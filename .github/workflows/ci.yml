@@ -24,7 +24,7 @@ jobs:
           - { os: ubuntu-latest, node: 24 }
           - { os: windows-latest, node: 24 }
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v5
         with:
           node-version: ${{ matrix.node }}
@@ -43,7 +43,7 @@ jobs:
   lint:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: actions/setup-node@v5
         with:
           node-version: 24
@@ -55,7 +55,7 @@ jobs:
     name: C++ tests under ASan + UBSan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: cmake -S algorithms -B build-asan -DCMAKE_BUILD_TYPE=Debug -DROUTE_OPTI_SANITIZE=ON -DROUTE_OPTI_WERROR=ON
       - run: cmake --build build-asan --parallel
       - run: ctest --test-dir build-asan --output-on-failure
@@ -64,7 +64,7 @@ jobs:
     name: Docker image smoke test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - run: docker build -t route-opti .
       - run: docker run -d --name route-opti -p 8080:8080 route-opti
       - name: Health check and sample optimization
