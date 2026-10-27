@@ -398,7 +398,7 @@ export default function CityMap({
       </svg>
 
       {/* Map Legend */}
-      <div className="absolute bottom-3 left-3 flex flex-wrap items-center gap-3 px-3 py-1.5 rounded-xl bg-slate-900/90 backdrop-blur border border-slate-800 text-[11px] shadow-lg">
+      <div className="absolute bottom-2.5 left-2.5 max-w-[calc(100%-1.25rem)] flex flex-wrap items-center gap-2 sm:gap-3 px-2.5 sm:px-3 py-1.5 rounded-xl bg-slate-900/90 backdrop-blur border border-slate-800 text-[10px] sm:text-[11px] shadow-lg pointer-events-none">
         <div className="flex items-center gap-1.5">
           <span className="w-2.5 h-2.5 rounded bg-amber-500" />
           <span className="text-slate-300 font-medium">Warehouse (Start/End)</span>

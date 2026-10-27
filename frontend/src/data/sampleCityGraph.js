@@ -11,7 +11,7 @@ export const SAMPLE_PRESETS = [
     description: 'Dense commercial street network with 9 intersections and multiple alternative avenues.',
     warehouse: 'W',
     availableCustomerStops: ['S1', 'S2', 'S3', 'S4', 'S5'],
-    defaultStopCount: 5,
+    defaultStopCount: 4,
     nodes: [
       { id: 'W',  name: 'Central Logistics Hub',     lat: 37.7830, lng: -122.4080, type: 'warehouse' },
       { id: 'S1', name: 'North Market Drop',         lat: 37.7915, lng: -122.3990, type: 'customer' },
