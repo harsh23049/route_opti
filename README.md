@@ -1,53 +1,52 @@
 # Smart Delivery Route Optimization
 
 > **College Algorithms Mini-Project**  
-> *A self-contained, multi-tier implementation of graph traversal and heuristic route optimization for urban package delivery.*
+> *A multi-tier implementation of graph shortest paths, TSP heuristics, local search and exact dynamic programming for urban package delivery.*
 
-[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.wikipedia.org/wiki/C%2B%2B17)
-[![Express](https://img.shields.io/badge/Express-4.19-lightgrey.svg)](https://expressjs.com/)
-[![React](https://img.shields.io/badge/React-18.3-61dafb.svg)](https://react.dev/)
-[![Vite](https://img.shields.io/badge/Vite-5.4-646cff.svg)](https://vitejs.dev/)
-[![Tests](https://img.shields.io/badge/Tests-100%25%20Passing-brightgreen.svg)]()
+[![CI](https://github.com/harsh23049/route_opti/actions/workflows/ci.yml/badge.svg)](https://github.com/harsh23049/route_opti/actions/workflows/ci.yml)
+[![C++17](https://img.shields.io/badge/C%2B%2B-17-blue.svg)](https://en.cppreference.com/w/cpp/17)
+[![Node](https://img.shields.io/badge/Node-%E2%89%A522-339933.svg)](https://nodejs.org/)
+[![React](https://img.shields.io/badge/React-18-61dafb.svg)](https://react.dev/)
 
 ---
 
 ## 1. Problem Statement
 
-Urban parcel delivery operations face the challenge of dispatching delivery vehicles from a central logistics depot to visit a specified set of customer locations across a physical city road network and return to the depot. 
+A delivery vehicle leaves a central depot, visits a set of customer locations on a city road network, and returns to the depot. The goal is the shortest total road distance.
 
-Formally, this problem maps to the **Metric Traveling Salesperson Problem (TSP)** defined over an induced shortest-path metric of an undirected road network graph $G = (V, E, w)$.
+Formally, this is the **Metric Traveling Salesperson Problem (TSP)** over the shortest-path metric of an undirected road graph $G = (V, E, w)$. TSP is **NP-hard**, so the engine combines exact and heuristic methods:
 
-Because the TSP is **NP-hard**, computing the exact global optimum becomes computationally prohibitive for real-time dispatch systems. This project designs, implements, and visualizes a multi-stage approximation pipeline:
-1. **Dijkstra's Shortest Path Algorithm** to determine exact shortest road distances and reconstruct turn-by-turn intersection sequences between all points of interest.
-2. **Nearest Neighbor Heuristic** to rapidly construct an initial closed delivery tour starting and ending at the warehouse.
-3. **2-Opt Local Search** to iteratively untangle crossed routes and improve total tour distance while preserving the fixed depot endpoints.
+1. **Dijkstra's algorithm** computes exact shortest road distances and turn-by-turn paths between all points of interest.
+2. **Nearest Neighbor** builds an initial closed tour from the depot.
+3. **2-Opt local search** untangles crossings by reversing tour segments.
+4. **Or-opt local search** relocates segments of 1 to 3 stops. It alternates with 2-Opt until neither improves the tour.
+5. **Held-Karp dynamic programming** computes the exact optimum for up to 15 stops. The response reports how far the heuristic is from optimal.
 
 ---
 
 ## 2. Key Features
 
-- **Pure Algorithmic Core:** Zero external cloud map APIs (no Google Maps, no Leaflet, no Mapbox). Every road and route geometry is derived directly from the underlying graph topology.
-- **Native SVG Simulated City Map:** Renders road networks from actual graph edge definitions, complete with start depot markers, numbered customer stops, cyan route polylines, and an animated delivery vehicle.
-- **Side-by-Side Algorithm Comparison:** Interactively compare the initial greedy Nearest Neighbor tour against the 2-Opt optimized tour.
-- **Deterministic Live Metrics:** Real-time cards displaying Initial Distance, Optimized Distance, Distance Saved, Improvement Percentage, and C++ Execution Latency in milliseconds.
-- **Safe Inter-Process Communication (IPC):** Node.js Express server invokes the compiled C++ executable via `child_process.spawn` using structured JSON over `stdin`/`stdout`.
-- **Interactive Tour Replay & Scrubber:** Playback animation with variable progress scrubbing to simulate vehicle traversal along shortest-path road sequences.
-- **Strict Input Validation & Error Handling:** Comprehensive guards against disconnected graphs, unreachable stops, negative edge weights, invalid stop IDs, and malformed payloads.
+- **Pure algorithmic core:** no external map APIs. Every road and route geometry comes from the input graph.
+- **Native SVG city map:** roads drawn from the graph edges, depot and numbered stop markers, route polylines and an animated vehicle.
+- **Three-way route comparison:** Nearest Neighbor vs optimized (2-Opt + Or-opt) vs exact optimum (Held-Karp).
+- **Live metrics:** initial and optimized distance, distance saved, improvement %, optimality gap and engine latency.
+- **Safe process boundary:** Express runs the compiled C++ engine with `child_process.spawn` (no shell), passing JSON over stdin/stdout, with a bounded job pool, wait queue and timeout.
+- **Strict validation:** one request schema with no aliases, finite non-negative distances, coordinate ranges, and size limits on nodes, roads, stops and body.
+- **Tested on Linux and Windows in CI:** C++ unit and property tests (also under ASan/UBSan), API tests, end-to-end tests, lint, and a Docker smoke test.
 
 ---
 
 ## 3. Assumptions & Theoretical Foundations
 
 ### 3.1. Graph Assumptions
-1. **Undirected Road Network:** Every street segment is bidirectional with identical travel distance in both directions ($w(u, v) = w(v, u)$).
-2. **Non-Negative Edge Distances:** Physical road lengths satisfy $w(e) \ge 0$, meeting the invariant for Dijkstra's algorithm.
-3. **Symmetric Shortest-Path Distances:** The induced distance metric satisfies $\text{dist}_G(u, v) = \text{dist}_G(v, u)$ and the triangle inequality $\text{dist}_G(u, v) \le \text{dist}_G(u, z) + \text{dist}_G(z, v)$.
+1. **Undirected road network:** every street segment has the same length in both directions ($w(u, v) = w(v, u)$).
+2. **Non-negative, finite edge distances:** $0 \le w(e) < \infty$, as Dijkstra requires.
+3. **Metric distances:** the shortest-path distance is symmetric and satisfies the triangle inequality.
 
-### 3.2. Theoretical Limitations (Heuristics vs. Global Optimum)
-- **Nearest Neighbor is a Greedy Heuristic:**  
-  At each step, it chooses the closest unvisited customer. Because it makes locally greedy choices without foresight into remaining global topology, it can be forced into high-cost return edges ("greedy trap"). **Nearest Neighbor does not guarantee the global optimum.**
-- **2-Opt is a Local Search:**  
-  2-Opt evaluates all 2-edge exchange moves and applies improvements until no further 2-swap reduces the tour length. It terminates at a **local optimum** with respect to the 2-exchange neighborhood. **2-Opt does not guarantee the global optimum**, as it cannot escape local minima that require 3-opt, k-opt, or non-improving intermediate moves.
+### 3.2. Heuristics vs Global Optimum
+- **Nearest Neighbor** is greedy. It can be forced into long return legs and **does not guarantee the optimum**.
+- **2-Opt** and **Or-opt** stop at a **local optimum** of their neighborhoods. They **do not guarantee the global optimum** either.
+- **Held-Karp** is exact but exponential ($O(2^n n^2)$). It runs only for $n \le 15$ stops and serves as ground truth for the heuristics. See the benchmark below.
 
 ---
 
@@ -56,234 +55,231 @@ Because the TSP is **NP-hard**, computing the exact global optimum becomes compu
 ```
 ┌────────────────────────────────────────────────────────┐
 │               Frontend: React + Vite                   │
-│   - Interactive SVG City Road Network Map              │
-│   - Route Controls (Presets, Stop Count, Playback)     │
-│   - Live Metric Cards & Dispatch Itinerary             │
+│   - Interactive SVG city road network map              │
+│   - Stop selection, route comparison, playback         │
+│   - Metric cards & dispatch itinerary                  │
 └───────────────────────────┬────────────────────────────┘
                             │ HTTP POST /api/optimize (JSON)
                             ▼
 ┌────────────────────────────────────────────────────────┐
 │             Backend: Node.js + Express                 │
-│   - Request validation (schema, IDs, non-negative)     │
-│   - Safe child_process.spawn IPC (Fixed binary path)   │
-│   - stderr isolation & HTTP status mapping             │
+│   - Strict schema + size limits (trust boundary)       │
+│   - Bounded engine job pool, queue, timeout            │
+│   - Error → HTTP status mapping, static UI in prod     │
 └───────────────────────────┬────────────────────────────┘
-                            │ stdin / stdout (Pure JSON streams)
+                            │ stdin / stdout (one JSON document each)
                             ▼
 ┌────────────────────────────────────────────────────────┐
 │         C++17 Engine: optimizer_engine                 │
-│   1. Graph Adjacency List                              │
-│   2. Dijkstra All-Pairs Distance Matrix                │
-│   3. Nearest Neighbor Tour Construction                │
-│   4. 2-Opt Local Search (O(1) symmetric delta)         │
-│   5. Full Road Node & Coordinate Path Expansion        │
+│   1. Graph adjacency list                              │
+│   2. Dijkstra from every stop → distance matrix        │
+│   3. Nearest Neighbor tour construction                │
+│   4. 2-Opt + Or-opt local search (O(1) move deltas)    │
+│   5. Held-Karp exact optimum (≤ 15 stops)              │
+│   6. Road-level path and coordinate expansion          │
 └────────────────────────────────────────────────────────┘
 ```
+
+More detail: [docs/architecture.md](docs/architecture.md).
 
 ---
 
 ## 5. Time & Space Complexity
 
-Let $|V|$ = number of road intersections, $|E|$ = number of road segments, and $K = |C| + 1$ = number of stops (warehouse + customer stops), with $K \ll |V|$:
+Let $|V|$ = intersections, $|E|$ = road segments, $K = |C| + 1$ = stops including the depot, $n = K - 1$.
 
-| Phase | Algorithm | Time Complexity | Space Complexity | Description |
-|---|---|---|---|---|
-| **Graph Modeling** | Adjacency List | $O(\|V\| + \|E\|)$ | $O(\|V\| + \|E\|)$ | Stores nodes and non-negative edges |
-| **Shortest Paths** | Dijkstra (Min-Heap) | $O(K \cdot (\|V\| + \|E\|) \log \|V\|)$ | $O(\|V\| + \|E\|)$ | Single-source shortest path from each stop |
-| **Distance Matrix** | All-Pairs Matrix | $O(K^2)$ | $O(K^2)$ | Symmetric matrix caching distances & paths |
-| **Tour Construction** | Nearest Neighbor | $O(K^2)$ | $O(K)$ | Greedy selection across unvisited set |
-| **Tour Optimization** | 2-Opt Local Search | $O(M \cdot K^2)$ | $O(K)$ | $M$ = number of improving passes ($M \le 1000$) |
-| **Path Expansion** | Road Geometry | $O(L)$ | $O(L)$ | $L$ = total road nodes in complete tour |
-| **Total Engine** | Full Pipeline | $O(K (\|V\| + \|E\|)\log \|V\| + M K^2)$ | $O(\|V\| + \|E\| + K^2)$ | Sub-millisecond execution for typical deliveries |
+| Phase | Algorithm | Time | Space |
+|---|---|---|---|
+| Graph modeling | Adjacency list | $O(\|V\| + \|E\|)$ | $O(\|V\| + \|E\|)$ |
+| Shortest paths | Dijkstra (binary heap), once per stop | $O(K (\|V\| + \|E\|) \log \|V\|)$ | $O(K \cdot \|V\|)$ predecessor trees |
+| Tour construction | Nearest Neighbor | $O(K^2)$ | $O(K)$ |
+| Tour improvement | 2-Opt, Or-opt | $O(K^2)$ per pass / move | $O(K)$ |
+| Exact reference | Held-Karp | $O(2^n n^2)$, only $n \le 15$ | $O(2^n n)$ |
+| Path expansion | Leg concatenation | $O(L)$, $L$ = road nodes on the route | $O(L)$ |
 
-*Note on Brute Force:* In the automated test suite (`algorithms/tests/test_algorithms.cpp`), an exact brute-force TSP solver is implemented for verification on small graphs ($K \le 8$). It runs in $O(K! \cdot K)$ time, illustrating the necessity of the heuristic + local search approach for scalable applications.
+Full derivations: [docs/algorithm-design.md](docs/algorithm-design.md).
 
 ---
 
-## 6. Monorepo Structure
+## 6. Benchmark
+
+`npm run bench` builds seeded random 20×20 grid cities (400 intersections, roads 0–30% longer than straight lines) and runs the engine 10 times per row:
+
+| Stops | NN (km) | + 2-Opt (km) | + Or-opt (km) | Improvement % | Optimal (km) | Gap to optimal % | Optimal found | Engine ms (median) |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 5 | 25.26 | 23.87 | 23.87 | 5.9 | 23.87 | 0.00 | 10/10 | 3.42 |
+| 10 | 37.07 | 33.79 | 33.28 | 9.5 | 33.27 | 0.02 | 9/10 | 3.99 |
+| 15 | 43.15 | 38.65 | 38.30 | 10.9 | 37.99 | 0.87 | 6/10 | 18.23 |
+| 25 | 55.73 | 47.97 | 47.28 | 15.2 | — | — | — | 4.22 |
+| 50 | 76.92 | 66.41 | 64.32 | 16.0 | — | — | — | 5.32 |
+| 100 | 107.99 | 91.04 | 86.21 | 19.8 | — | — | — | 8.40 |
+
+Takeaways: local search saves 6–20% over Nearest Neighbor, and the savings grow with the number of stops. Where the optimum is computable, the final tour is within 1% of it. The 15-stop row is the slowest because Held-Karp's $2^{15}$ states dominate. (Measured on a Windows laptop; absolute times vary by machine.)
+
+---
+
+## 7. Monorepo Structure
 
 ```
 route_opti/
-├── algorithms/                 # C++17 optimization engine (CMake build)
-│   ├── include/                # Graph, Dijkstra, DistanceMatrix, NearestNeighbor, TwoOpt, Json
-│   ├── src/                    # Implementation modules & JSON CLI runner
-│   ├── tests/                  # CTest suite with brute-force TSP reference solver
+├── algorithms/                 # C++17 optimization engine (CMake)
+│   ├── include/ src/           # Graph, Dijkstra, DistanceMatrix, NearestNeighbor, TwoOpt,
+│   │                           # OrOpt, HeldKarp, Optimizer, Json, JsonInterface, main
+│   ├── tests/                  # CTest suite (unit + randomized property tests)
 │   └── CMakeLists.txt
-├── backend/                    # Express API server (bridge to C++ engine)
-│   ├── src/
-│   │   ├── app.js              # Express app & server entry
-│   │   ├── config.js           # Environment & binary path configuration
-│   │   ├── routes/             # POST /api/optimize & GET /api/health
-│   │   ├── services/           # C++ spawn runner
-│   │   └── validators/         # Input validation
-│   ├── tests/                  # Automated backend integration tests
-│   └── package.json
-├── frontend/                   # React + Vite + Tailwind CSS dashboard
-│   ├── src/
-│   │   ├── components/         # CityMap (SVG), MetricCards, RouteControls, StopItinerary
-│   │   ├── data/               # Labeled sample city graph presets
-│   │   └── services/           # Axios API client
-│   └── package.json
-├── docs/                       # Project documentation
-│   ├── algorithm-design.md     # Mathematical formulations, complexities, and design
-│   ├── test-cases.md           # Complete test case breakdown and test results
-│   ├── architecture.md         # Architecture and component design
-│   └── json-interface.md       # JSON payload schema specifications
-├── scripts/
-│   └── e2e-test.js             # Automated End-to-End integration test suite
-├── package.json                # Root monorepo scripts
-└── README.md
+├── backend/                    # Express API (bridge to the engine)
+│   ├── src/                    # app.js, config.js, routes/, services/cppRunner.js, validators/
+│   └── tests/api.test.js       # node:test API tests
+├── frontend/                   # React + Vite + Tailwind dashboard
+├── data/                       # sample-input.json and the engine's sample-output.json
+├── docs/                       # algorithm design, JSON interface, architecture, test catalog
+├── scripts/                    # e2e.test.js, benchmark.js
+├── .github/                    # CI workflow, Dependabot
+├── Dockerfile
+└── package.json                # npm workspaces root (backend, frontend)
 ```
 
 ---
 
-## 7. Setup & Prerequisites
+## 8. Setup & Prerequisites
 
-### Prerequisites
-- **C++ Compiler:** Clang++ or G++ supporting C++17
-- **CMake:** Version 3.14 or higher (`cmake --version`)
-- **Node.js:** v18.0.0 or higher (`node -v`)
-- **npm:** v9.0.0 or higher (`npm -v`)
+- **C++17 compiler:** GCC 9+, Clang 10+, or MSVC 2019+ (Visual Studio Build Tools on Windows)
+- **CMake** 3.16+
+- **Node.js** 22+ (npm 10+)
+
+```bash
+npm ci                 # installs backend + frontend + tooling (npm workspaces, one lockfile)
+npm run build:cpp      # builds algorithms/build/optimizer_engine(.exe)
+```
+
+> **Windows:** run the commands from a "Developer PowerShell for VS" (or any shell with CMake and MSVC on `PATH`). The build always places the binary at `algorithms/build/optimizer_engine.exe`, where the backend expects it.
 
 ---
 
-## 8. Build & Execution Commands
+## 9. Running
 
-### 8.1. Root Automation (Recommended)
-
-From the project root directory:
-
+### Development (two terminals)
 ```bash
-# 1. Build C++ target and Frontend bundle
-npm run build:cpp
+npm run dev:backend    # API on http://localhost:5001 (restarts on change)
+npm run dev:frontend   # UI on http://localhost:3000 (proxies /api to :5001)
+```
+
+### Production (single port)
+```bash
 npm run build:frontend
-
-# 2. Run All Automated Test Suites (C++ + Backend + End-to-End)
-npm test
-
-# 3. Start Development Servers
-# Terminal 1: Backend API (Port 5001)
-npm run dev:backend
-
-# Terminal 2: Frontend Dashboard (Port 3000)
-npm run dev:frontend
+npm start              # serves the UI and the API on http://localhost:5001
 ```
 
-### 8.2. Individual Component Commands
-
-#### C++ Engine:
+### Docker
 ```bash
-cd algorithms
-cmake -B build -S .
-cmake --build build
-ctest --test-dir build --output-on-failure
+docker build -t route-opti .
+docker run -p 8080:8080 route-opti     # http://localhost:8080
 ```
+The image builds and tests the engine, builds the UI, and runs as a non-root user with a health check.
 
-#### Express Backend:
+### Engine CLI
 ```bash
-cd backend
-npm install
-npm test
-npm start
+algorithms/build/optimizer_engine --file data/sample-input.json
+algorithms/build/optimizer_engine --demo
 ```
+See [docs/json-interface.md](docs/json-interface.md) for modes and exit codes.
 
-#### React Frontend:
-```bash
-cd frontend
-npm install
-npm run build
-npm run dev
-```
+### Configuration (environment variables)
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `PORT` | `5001` | API port |
+| `FRONTEND_URL` | `http://localhost:3000` | Allowed CORS origin (dev server) |
+| `CPP_EXECUTABLE_PATH` | `algorithms/build/optimizer_engine[.exe]` | Engine binary |
+| `STATIC_DIR` | `frontend/dist` | Built UI to serve (skipped if missing) |
+| `EXECUTION_TIMEOUT_MS` | `5000` | Engine run time limit (504 after this) |
+| `MAX_CONCURRENT_JOBS` | CPU count | Parallel engine processes |
+| `MAX_QUEUED_JOBS` | `32` | Requests waiting for a slot (503 beyond this) |
+| `MAX_BODY_SIZE` | `2mb` | Request body limit (413 beyond this) |
+| `MAX_NODES` / `MAX_ROADS` / `MAX_STOPS` | `5000` / `20000` / `100` | Graph size limits (400 beyond these) |
 
 ---
 
-## 9. Sample Input & Output
+## 10. API Example
 
-### Sample Request (`POST /api/optimize`)
+`POST /api/optimize` with [data/sample-input.json](data/sample-input.json) (the "Downtown Metro Grid" graph, 4 stops):
+
 ```json
 {
-  "warehouse": "W",
-  "stops": ["S1", "S2", "S3", "S4"],
+  "warehouse": "node_0",
+  "stops": ["node_1", "node_2", "node_3", "node_4"],
   "nodes": [
-    { "id": "W",  "name": "Central Depot",       lat: 37.7830, lng: -122.4080 },
-    { "id": "S1", "name": "North Market Drop",   lat: 37.7915, lng: -122.3990 },
-    { "id": "S2", "name": "Financial Tower",     lat: 37.7940, lng: -122.4020 },
-    { "id": "S3", "name": "Tech Innovation Hub", lat: 37.7875, lng: -122.3910 },
-    { "id": "S4", "name": "South Park Drop",     lat: 37.7820, lng: -122.3940 },
-    { "id": "J1", "name": "Market Junction",     lat: 37.7880, lng: -122.4030 },
-    { "id": "J2", "name": "Mission Junction",    lat: 37.7845, lng: -122.4040 }
+    { "id": "node_0", "name": "Central Logistics Hub", "lat": 37.7830, "lng": -122.4080 },
+    { "id": "j_1", "name": "Market & 3rd Junction", "lat": 37.7880, "lng": -122.4030 }
   ],
   "roads": [
-    { "source": "W",  "target": "J1", "distance_km": 0.85 },
-    { "source": "W",  "target": "J2", "distance_km": 0.50 },
-    { "source": "J1", "target": "S1", "distance_km": 0.65 },
-    { "source": "S1", "target": "S2", "distance_km": 0.40 },
-    { "source": "S2", "target": "J1", "distance_km": 0.70 },
-    { "source": "J1", "target": "J2", "distance_km": 0.45 },
-    { "source": "J2", "target": "S4", "distance_km": 0.60 },
-    { "source": "S4", "target": "S3", "distance_km": 0.75 },
-    { "source": "S3", "target": "S1", "distance_km": 0.90 }
+    { "source": "node_0", "target": "j_1", "distance_km": 0.85, "street_name": "Hub Main Way" }
+  ]
+}
+```
+*(nodes and roads shortened here; see the file for the full graph)*
+
+Response excerpt (full: [data/sample-output.json](data/sample-output.json)):
+
+```json
+{
+  "success": true,
+  "initialRoute":   ["node_0", "node_1", "node_2", "node_3", "node_4", "node_0"],
+  "optimizedRoute": ["node_0", "node_2", "node_1", "node_3", "node_4", "node_0"],
+  "initialDistance": 5.45,
+  "optimizedDistance": 5.1,
+  "distanceSaved": 0.35,
+  "improvementPercent": 6.42201834862,
+  "optimalDistance": 5.1,
+  "optimalityGapPercent": 0,
+  "stages": [
+    { "algorithm": "Nearest Neighbor", "distanceKm": 5.45 },
+    { "algorithm": "2-Opt", "distanceKm": 5.1 },
+    { "algorithm": "Or-opt", "distanceKm": 5.1 }
+  ],
+  "legs": [
+    { "from": "node_0", "to": "node_2", "distanceKm": 1.55,
+      "pathNodes": ["node_0", "j_1", "node_2"],
+      "coordinates": [[37.783, -122.408], [37.788, -122.403], [37.794, -122.402]] }
   ]
 }
 ```
 
-### Sample Response (`HTTP 200 OK`)
-```json
-{
-  "initialRoute": ["W", "S4", "S3", "S1", "S2", "W"],
-  "optimizedRoute": ["W", "S4", "S3", "S2", "S1", "W"],
-  "initialDistance": 5.45,
-  "optimizedDistance": 5.10,
-  "distanceSaved": 0.35,
-  "improvementPercent": 6.42,
-  "executionTimeMs": 0.044,
-  "legs": [
-    {
-      "from": "W",
-      "to": "S4",
-      "distanceKm": 1.10,
-      "pathNodes": ["W", "J2", "S4"],
-      "coordinates": [[37.7830, -122.4080], [37.7845, -122.4040], [37.7820, -122.3940]]
-    }
-  ],
-  "fullRoadPath": ["W", "J2", "S4", "S3", "S1", "S2", "J1", "J2", "W"],
-  "fullCoordinates": [[37.7830, -122.4080], [37.7845, -122.4040], ...]
-}
+2-Opt reverses the `node_1 → node_2` segment of the greedy tour and saves 0.35 km (6.42%). Held-Karp confirms that 5.10 km is optimal. The optimal route printed is the same tour driven in the opposite direction.
+
+---
+
+## 11. Testing
+
+```bash
+npm test               # C++ (ctest) + backend API (node:test) + end-to-end (node:test)
+npm run lint           # ESLint for backend, scripts and frontend
+npm run bench          # benchmark table above
 ```
 
----
+| Suite | Scope |
+|---|---|
+| C++ `ctest` | 15 suites / 601 assertions: Dijkstra, unreachable nodes, NN/2-Opt/Or-opt invariants, Held-Karp vs brute force, randomized property tests, strict JSON schema, parser robustness. Also CLI exit-code tests |
+| Backend API | 17 tests: validation (aliases, Infinity, limits), error mapping (400/404/413/503), real engine results |
+| End-to-end | 6 tests against a separately started server: concurrency, and **every leg of every route follows real road edges** |
 
-## 10. Automated Testing Verification
-
-The project includes 3 test suites verifying mathematical invariants and integration integrity:
-1. **C++ Algorithm Tests (`ctest`):** 106 assertions verifying Dijkstra paths, unreachable location errors, symmetric matrices, Nearest Neighbor invariants, 2-Opt cost non-increase, and brute-force reference comparison.
-2. **Backend API Tests (`npm test --prefix backend`):** 9 tests verifying validation, error codes, CORS headers, child process execution, and error handling.
-3. **End-to-End Integration Tests (`npm run test:e2e`):** 6 tests verifying empty input handling, invalid stop rejection, disconnected graph detection, rapid repeated clicks/concurrency, and step-by-step verification that **every leg strictly follows actual road edges in the graph**.
-
----
-
-## 11. Known Limitations
-
-1. **Static Graph Model:** Edge weights represent static road distances; dynamic traffic congestion, turn penalties, and one-way streets are not currently modeled.
-2. **Heuristic Nature:** As documented, Nearest Neighbor and 2-Opt do not guarantee global optimality for all instances of the NP-hard TSP.
-3. **Single Vehicle Model:** Solves the Single Traveling Salesperson Problem (one delivery vehicle with infinite capacity). Multi-vehicle Vehicle Routing Problems (VRP) with capacity limits are out of scope.
+CI also runs the C++ tests under ASan + UBSan and smoke-tests the Docker image. Full catalog: [docs/test-cases.md](docs/test-cases.md).
 
 ---
 
-## 12. Instructions for Report Screenshots
+## 12. Known Limitations
 
-For inclusion in college project reports and submission slide decks, take the following screenshots:
+1. **Static graph:** traffic, turn penalties and one-way streets are not modeled. Directed edges would break the symmetric $O(1)$ 2-Opt delta, which assumes $D[u][v] = D[v][u]$.
+2. **Heuristic above 15 stops:** the optimality gap is reported only where Held-Karp is feasible.
+3. **Single vehicle:** one vehicle with unlimited capacity. Multi-vehicle routing with capacities or time windows (VRP / VRPTW) is out of scope.
 
-1. **Full Dashboard Overview:**
-   - URL: `http://localhost:3000`
-   - Select preset **"Downtown Metro Grid (5 Stops)"** with stop count set to **4**.
-   - Capture the full browser window showing the header, status badge ("API Connected • C++ Ready"), Metric Cards, SVG Map, Controls, and Itinerary.
-2. **2-Opt Optimization & Untangled Route:**
-   - Click **"Run 2-Opt Optimization"**.
-   - Capture the cyan route line on the SVG map and the Metric Cards showing the distance saved (`0.35 km`) and improvement (`6.42%`).
-3. **Algorithm Comparison View:**
-   - Toggle between **"Nearest Neighbor"** and **"2-Opt Optimized"** under Display Route to demonstrate the sub-tour reversal and visual untangling.
-4. **Simulation Replay:**
-   - Click the Play button in the playback scrubber to show the animated delivery vehicle traveling along the route.
-5. **Terminal Test Passes:**
-   - Run `npm test` in the terminal and capture the console output showing all 3 test suites passing 100%.
+---
+
+## 13. Instructions for Report Screenshots
+
+1. **Dashboard overview:** open `http://localhost:3000`, pick **"Downtown Metro Grid"** with the default stops (S1–S4). Capture the header (status "API Connected • C++ Ready"), metric cards, map, controls and itinerary.
+2. **Optimization result:** click **"Optimize Route"**. Capture the route on the map and the metric cards: 0.35 km saved, 6.4% improvement, 0% optimality gap.
+3. **Algorithm comparison:** switch the route view between **Nearest Neighbor**, **Optimized** and **Optimal** to show the segment reversal.
+4. **Custom stops:** click map nodes to add or remove stops, then optimize again.
+5. **Simulation replay:** press Play on the playback scrubber to show the animated vehicle.
+6. **Benchmark & tests:** run `npm run bench` and `npm test` and capture the terminal output.

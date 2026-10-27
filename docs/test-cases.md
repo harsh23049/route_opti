@@ -1,108 +1,86 @@
 # Test Cases & Verification Suite
 
-This document catalogs the test cases, verification methodologies, and test harness execution for the **Smart Delivery Route Optimization** project across all three architectural layers:
-1. **C++ Algorithm Core Tests** (`ctest` / `test_runner`)
-2. **Backend API Integration Tests** (`npm test` in `backend/`)
-3. **End-to-End System Tests** (`node scripts/e2e-test.js`)
+The project is tested at three layers. All of them run with `npm test` and in CI (Linux and Windows):
 
----
-
-## 1. C++ Engine Test Suite (`test_algorithms.cpp`)
-
-Located at [algorithms/tests/test_algorithms.cpp](file:///Users/harshdeepsingh/Desktop/route_opti/algorithms/tests/test_algorithms.cpp). Executed with:
-```bash
-ctest --test-dir algorithms/build --output-on-failure
-```
-Total Assertions: **106 automated checks** covering 8 distinct test suites.
-
-| Suite ID | Test Name | Purpose / Scenario Tested | Invariant Verified |
+| Layer | File | Runner | Command |
 |---|---|---|---|
-| **CPP-01** | `testGraphBuilding` | Adjacency list construction, edge addition, node lookups | Non-negative edge rejection, vertex count correctness |
-| **CPP-02** | `testDijkstraShortestPath` | Dijkstra shortest path on known triangle and multi-hop grid | Distance matches manual calculation, path reconstruction |
-| **CPP-03** | `testUnreachableNodeDetection` | Disconnected node with no edges to warehouse | Distance is `INFINITY`, path is empty, matrix build throws error |
-| **CPP-04** | `testDistanceMatrix` | All-pairs shortest path matrix between warehouse and stops | Matrix symmetry ($D[u][v] = D[v][u]$), zero diagonal ($D[u][u]=0$) |
-| **CPP-05** | `testNearestNeighborProperties` | Greedy tour construction starting and ending at warehouse | Tour starts at $w_0$, ends at $w_0$, visits every stop exactly once |
-| **CPP-06** | `testTwoOptOptimization` | 2-Opt local search on crossing tour | $\text{cost}_{\text{2-opt}} \le \text{cost}_{\text{NN}}$, depot endpoints fixed |
-| **CPP-07** | `testBruteForceOptimalComparison` | Compares 2-opt tour cost against brute-force reference TSP solver on small graph | 2-opt finds valid tour within bounded approximation ratio |
-| **CPP-08** | `testJsonInterfacePipeline` | End-to-end JSON serialization, leg extraction, error handling | Valid JSON syntax, leg geometries match node coordinates |
+| C++ algorithm core | `algorithms/tests/test_algorithms.cpp` | CTest | `npm run test:cpp` |
+| Backend API | `backend/tests/api.test.js` | `node:test` | `npm run test:backend` |
+| End-to-end | `scripts/e2e.test.js` | `node:test` | `npm run test:e2e` |
+
+CI also runs the C++ suite under AddressSanitizer + UndefinedBehaviorSanitizer, and smoke-tests the Docker image.
 
 ---
 
-## 2. Backend Express API Test Suite (`backendTests.js`)
+## 1. C++ Engine (`ctest`)
 
-Located at [backend/tests/backendTests.js](file:///Users/harshdeepsingh/Desktop/route_opti/backend/tests/backendTests.js). Executed with:
-```bash
-npm test --prefix backend
-```
-Total Test Cases: **9 automated tests**.
+CTest registers three tests:
 
-| Test ID | Method & Endpoint | Input Scenario | Expected Status & Behavior |
+| CTest name | What it runs |
+|---|---|
+| `algorithm_unit_tests` | `test_runner`: 15 suites, 601 assertions |
+| `engine_cli_sample_input` | `optimizer_engine --file data/sample-input.json` must exit 0 |
+| `engine_cli_missing_file_fails` | `optimizer_engine --file <missing>` must exit non-zero |
+
+`test_runner` suites:
+
+| # | Suite | Scenario | Invariant verified |
 |---|---|---|---|
-| **API-01** | `GET /api/health` | Standard health probe | Status `200 OK`, `executable.exists === true` |
-| **API-02** | `OPTIONS /api/optimize` | CORS preflight request | `Access-Control-Allow-Origin: http://localhost:3000` |
-| **API-03** | `POST /api/optimize` | Valid sample city graph (W + 3 customer stops) | Status `200 OK`, valid C++ metrics returned on stdout |
-| **API-04** | `POST /api/optimize` | Missing `warehouse` attribute in payload | Status `400 Bad Request`, `code: "VALIDATION_ERROR"` |
-| **API-05** | `POST /api/optimize` | Non-existent customer stop ID in `stops` | Status `400 Bad Request`, mentions invalid stop ID |
-| **API-06** | `POST /api/optimize` | Negative edge distance ($w = -1.5$) | Status `400 Bad Request`, rejects negative weight |
-| **API-07** | `POST /api/optimize` | Disconnected stop with no path from depot | Status `400 Bad Request`, C++ stderr captured with unreachable message |
-| **API-08** | `POST /api/optimize` | Malformed JSON syntax (broken braces) | Status `400 Bad Request`, `code: "JSON_SYNTAX_ERROR"` |
-| **API-09** | `GET /api/unknown-endpoint`| Non-existent route | Status `404 Not Found`, `code: "NOT_FOUND"` |
+| 1 | `testDijkstraManuallyVerified` | 5-node graph where the direct edges are not the shortest | Distance 6.5 km, path `A-C-B-E-D`, street names |
+| 2 | `testUnreachableVertices` | Disconnected island component | Unreachable point-to-point result; matrix build fails with "Unreachable location" |
+| 3 | `testNearestNeighborProperties` | Ring graph with chords | Tour starts/ends at warehouse, each stop exactly once, distance equals the sum of legs |
+| 4 | `testTwoOptNeverIncreasesCost` | Instance where NN produces a crossing | 2-Opt cost <= NN cost, depot fixed, each stop exactly once |
+| 5 | `testAlreadyOptimalRoutes` | Triangle (only one tour exists) | Zero 2-Opt moves, zero savings |
+| 6 | `testSmallAndInvalidInputs` | 0 and 1 stops, unknown warehouse/stop, negative weight, empty/duplicate IDs | Degenerate tours, descriptive errors, `std::invalid_argument` |
+| 7 | `testBruteForceOptimalComparison` | 5 customers, 120 permutations | 2-Opt reaches the brute-force optimum |
+| 8 | `testRouteUtilsExpansion` | Multi-hop legs | Full road path has no duplicated seam nodes |
+| 9 | `testJsonInterfaceEndToEnd` | Valid, malformed and unreachable JSON payloads | Response schema and error responses |
+| 10 | `testHeldKarpMatchesBruteForce` | 27 random instances with 0 to 8 customers | Held-Karp cost equals brute force; refuses above 15 stops |
+| 11 | `testPipelineInvariantsRandom` | 30 random 12-stop instances | NN >= 2-Opt >= final >= optimum; final tour has no improving 2-Opt or Or-opt move |
+| 12 | `testLocalSearchFromShuffledTours` | Random 30-stop tours in shuffled order | Or-opt and 2-Opt strictly improve, keep a valid tour, and end at a local optimum |
+| 13 | `testRoadPathsAndEdgeValidation` | On-demand path rebuild; NaN / Infinity / negative edges | Correct reversed path, empty path for bad indices, edges rejected |
+| 14 | `testStrictJsonSchema` | Missing `distance_km`, legacy aliases, object stops, `1e999` | Descriptive errors instead of silent defaults or crashes |
+| 15 | `testJsonParserAndOptimalFields` | `-`, 10 000-deep nesting, `\u` escapes and surrogate pairs, 16-stop request | Parser errors (no crash), UTF-8 decoding, optimal fields present for small inputs and `null` above the limit |
+
+Suite 11 also prints how often the heuristic reached the exact optimum (28/30, mean gap 0.04%).
 
 ---
 
-## 3. End-to-End System Test Suite (`scripts/e2e-test.js`)
+## 2. Backend API (`backend/tests/api.test.js`)
 
-Located at [scripts/e2e-test.js](file:///Users/harshdeepsingh/Desktop/route_opti/scripts/e2e-test.js). Executed with:
-```bash
-npm run test:e2e
-```
-Starts a dedicated instance of the Express backend on test port 5099 and verifies the full stack integration.
+17 tests. The Express app listens on a random port, and requests run against the real C++ engine.
 
-### Test Case Breakdown:
-
-### Test E2E-01: Empty Input Rejection
-- **Input:** `{}` (empty JSON object), `{ stops: ['C1'] }` (missing warehouse), `{ warehouse: 'W', stops: [] }` (empty stops array).
-- **Assertion:** Returns HTTP `400 Bad Request` with `code: "VALIDATION_ERROR"`.
-
-### Test E2E-02: Invalid Stop IDs Rejection
-- **Input:** `stops: ['C1', 'NON_EXISTENT_CUSTOMER_STOP']`.
-- **Assertion:** Returns HTTP `400 Bad Request` with message explicitly naming the missing ID.
-
-### Test E2E-03: Unreachable Customer Stops
-- **Input:** Graph with disconnected island node `ISLAND_NODE` having degree 0.
-- **Assertion:** C++ engine detects infinite distance and returns HTTP `400 Bad Request` containing `"unreachable"`.
-
-### Test E2E-04: Malformed JSON Syntax
-- **Input:** Raw invalid string `'{ "warehouse": "W", "stops": [ invalid json syntax ...'`.
-- **Assertion:** Express middleware intercepts syntax error and returns HTTP `400 Bad Request` with `code: "JSON_SYNTAX_ERROR"`.
-
-### Test E2E-05: Repeated Clicks & Concurrency
-- **Input:** 5 simultaneous asynchronous `POST /api/optimize` requests fired concurrently.
-- **Assertion:** All 5 requests succeed with HTTP `200 OK` and return deterministic, identical route metrics without process race conditions.
-
-### Test E2E-06: Successful Optimization & Graph Edge Verification
-- **Input:** Complete road graph with warehouse `W` and customers `C1`, `C2`, `C3`.
-- **Assertions:**
-  1. **Cycle Start/End:** Initial and optimized routes start and end at `W`.
-  2. **Completeness:** Every stop in `stops` appears in both tours.
-  3. **Metric Formulas:**
-     - $\text{dist}_{\text{opt}} \le \text{dist}_{\text{init}}$
-     - $\text{saved} = \text{dist}_{\text{init}} - \text{dist}_{\text{opt}}$
-     - $\text{improvement} = (\text{saved} / \text{dist}_{\text{init}}) \times 100\%$
-     - $\text{executionTimeMs} \ge 0$
-  4. **Strict Graph Road Edge Conformance:**
-     - For every leg in `legs`, each step $(p_i, p_{i+1})$ in `leg.pathNodes` is looked up in the input `roads` array.
-     - The sum of actual edge distances for that leg matches `leg.distanceKm`.
-     - The sum of all leg distances matches `optimizedDistance`.
-  5. **Coordinate Integrity:** Every coordinate pair in `leg.coordinates` matches the exact latitude/longitude of the corresponding node in `nodes`.
+| Group | Test | Expected |
+|---|---|---|
+| Health | Binary present, path not exposed | `200`, `executable.exists === true`, no `executable.path` |
+| Health | CORS and headers | `Access-Control-Allow-Origin: http://localhost:3000`, no `X-Powered-By` |
+| Engine | Sample graph (`data/sample-input.json`) | `5.45 -> 5.10 km`, exact routes, 5 legs, optimum `5.10`, gap `0`, stages `[5.45, 5.1, 5.1]` |
+| Engine | Unreachable stop | `400 ALGORITHM_ERROR` |
+| Engine | Job pool and queue full | `503 ENGINE_BUSY` |
+| Validation | Missing warehouse | `400 VALIDATION_ERROR` |
+| Validation | Unknown stop | `400`, message names the stop |
+| Validation | Negative distance | `400`, "non-negative" |
+| Validation | Missing `distance_km` | `400` (no silent 0 km road) |
+| Validation | Legacy aliases `distanceKm`, `warehouseId`, `deliveryStops` | `400` |
+| Validation | Object-shaped stops | `400` |
+| Validation | `1e400` distance (Infinity after `JSON.parse`) | `400` |
+| Validation | Latitude 91 | `400` |
+| Validation | More than `MAX_STOPS` stops | `400` |
+| Errors | Malformed JSON | `400 JSON_SYNTAX_ERROR` |
+| Errors | 3 MB body | `413 PAYLOAD_TOO_LARGE` |
+| Errors | Unknown API route | `404 NOT_FOUND` |
 
 ---
 
-## 4. Test Execution Summary
+## 3. End-to-End (`scripts/e2e.test.js`)
 
-| Test Layer | Harness | Tests Executed | Passed | Failed |
-|---|---|---|---|---|
-| **Algorithms (C++)** | `ctest` | 1 test (106 assertions) | 106 | 0 |
-| **Backend API** | Node.js Test Harness | 9 endpoint scenarios | 9 | 0 |
-| **End-to-End System** | HTTP E2E Test Suite | 6 multi-step integration tests | 6 | 0 |
-| **Total** | Full Suite (`npm test`) | **All Tests** | **100% Pass** | **0 Failures** |
+Starts `backend/src/app.js` as a separate process on a free port, so each request goes through HTTP, Express and a spawned engine process.
+
+| # | Test | Assertions |
+|---|---|---|
+| E2E-01 | Empty input | `{}`, missing warehouse and empty `stops` all return `400 VALIDATION_ERROR` |
+| E2E-02 | Unknown stop IDs | `400`, message names the ID |
+| E2E-03 | Unreachable stop | `400 ALGORITHM_ERROR` mentioning "unreachable" |
+| E2E-04 | Malformed JSON | `400 JSON_SYNTAX_ERROR` |
+| E2E-05 | 8 concurrent requests (repeated clicks) | All `200`, identical distances |
+| E2E-06 | Full response check | All three routes (initial, optimized, optimal) start and end at the warehouse and visit every stop; `optimal <= optimized <= initial`; saved/percent formulas hold; **every step of every leg is a real road**, leg lengths equal their edge sums, legs sum to the tour distance, coordinates match the nodes |

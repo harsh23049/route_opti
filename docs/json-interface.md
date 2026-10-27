@@ -1,145 +1,141 @@
 # C++ Algorithm Engine — JSON Input/Output Interface
 
-The C++ optimization engine (`optimizer_engine`) provides a standard JSON input/output interface designed for seamless IPC (Inter-Process Communication) with the Node.js backend.
+The C++ optimization engine (`optimizer_engine`) reads one JSON request and writes one JSON response. The backend uses this interface over stdin/stdout. The HTTP API (`POST /api/optimize`) accepts the same request schema and returns the same response.
 
 ---
 
 ## 1. Execution Modes
 
-### Standard Input / Pipe (Recommended for IPC)
 ```bash
-cat payload.json | ./algorithms/build/optimizer_engine
+optimizer_engine < payload.json          # stdin (the backend's IPC path)
+optimizer_engine --file payload.json     # read from a file
+optimizer_engine --demo                  # built-in demonstration
+optimizer_engine --version               # print the engine version
+optimizer_engine --help                  # usage
 ```
 
-### File Argument
-```bash
-./algorithms/build/optimizer_engine --file /path/to/payload.json
-```
+On Windows the binary is `optimizer_engine.exe`. `npm run build:cpp` places it in `algorithms/build/` on every platform.
 
-### Terminal Demonstration Mode
-```bash
-./algorithms/build/optimizer_engine --demo
-```
+**Stream separation:** `stdout` carries exactly one JSON document. Diagnostics and timing go to `stderr`.
 
-> **Stream Separation Guarantee:**
-> - **Standard Output (`stdout`)**: Receives strictly valid, parseable JSON and nothing else.
-> - **Standard Error (`stderr`)**: Receives diagnostic logs, timing traces, and internal warning messages.
+**Exit codes:**
+
+| Code | Meaning |
+|---|---|
+| `0` | Success (`"success": true`) |
+| `1` | Request rejected or not solvable (`"success": false`, JSON still printed on stdout) |
+| `2` | Bad command-line arguments (usage printed on stderr) |
 
 ---
 
-## 2. Input JSON Schema
+## 2. Request Schema
 
-The engine accepts a complete road network graph, a designated warehouse/depot, and required delivery stop IDs:
+The schema is strict. Unknown aliases (`warehouseId`, `depot`, `deliveryStops`, `distanceKm`, `weight`, ...) are rejected, and a missing distance is never treated as 0 km.
 
 ```json
 {
-  "warehouse": "string (node ID of warehouse / starting hub)",
-  "stops": [
-    "string (node ID of required delivery stop 1)",
-    "string (node ID of required delivery stop 2)"
-  ],
+  "warehouse": "W",
+  "stops": ["S1", "S2"],
   "nodes": [
-    {
-      "id": "string (unique node ID)",
-      "name": "string (optional human-readable name)",
-      "lat": "number (latitude in degrees)",
-      "lng": "number (longitude in degrees)"
-    }
+    { "id": "W",  "name": "Central Depot", "lat": 37.7830, "lng": -122.4080 },
+    { "id": "S1", "name": "Market Drop",   "lat": 37.7915, "lng": -122.3990 },
+    { "id": "S2", "lat": 37.7940, "lng": -122.4020 }
   ],
   "roads": [
-    {
-      "source": "string (node ID)",
-      "target": "string (node ID)",
-      "distance_km": "number (non-negative road distance in km)",
-      "street_name": "string (optional street name)"
-    }
+    { "source": "W",  "target": "S1", "distance_km": 1.5, "street_name": "Main St" },
+    { "source": "S1", "target": "S2", "distance_km": 0.4 },
+    { "source": "S2", "target": "W",  "distance_km": 1.8 }
   ]
 }
 ```
 
-*Note: For compatibility, the engine also accepts `"warehouseId"` or `"depot"` (`"id"`), and `"deliveryStops"` or `"sampleDeliveryStops"`.*
+| Field | Type | Rules |
+|---|---|---|
+| `warehouse` | string | Must be a node ID |
+| `stops` | string[] | Node IDs. Duplicates and the warehouse itself are ignored |
+| `nodes[].id` | string | Unique, non-empty |
+| `nodes[].name` | string, optional | Defaults to the ID |
+| `nodes[].lat`, `lng` | number, optional | Default `0`. The API also enforces `[-90, 90]` / `[-180, 180]` |
+| `roads[].source`, `target` | string | Existing node IDs. Roads are undirected |
+| `roads[].distance_km` | number | Finite and `>= 0` |
+| `roads[].street_name` | string, optional | |
+
+**API limits** (configurable, see the README): 5000 nodes, 20000 roads, 100 stops, 2 MB body.
 
 ---
 
-## 3. Success Response Schema
+## 3. Success Response
 
-When optimization succeeds, the engine outputs:
+Response for `data/sample-input.json` (shortened; the full file is `data/sample-output.json`):
 
 ```json
 {
   "success": true,
-  "initialRoute": [
-    "node_0",
-    "node_5",
-    "node_4",
-    "node_3",
-    "node_1",
-    "node_2",
-    "node_0"
+  "initialRoute":   ["node_0", "node_1", "node_2", "node_3", "node_4", "node_0"],
+  "optimizedRoute": ["node_0", "node_2", "node_1", "node_3", "node_4", "node_0"],
+  "optimalRoute":   ["node_0", "node_4", "node_3", "node_1", "node_2", "node_0"],
+  "initialDistance": 5.45,
+  "optimizedDistance": 5.1,
+  "optimalDistance": 5.1,
+  "distanceSaved": 0.35,
+  "improvementPercent": 6.42201834862,
+  "optimalityGapPercent": 0,
+  "executionTimeMs": 0.28,
+  "stages": [
+    { "algorithm": "Nearest Neighbor", "distanceKm": 5.45 },
+    { "algorithm": "2-Opt", "distanceKm": 5.1 },
+    { "algorithm": "Or-opt", "distanceKm": 5.1 }
   ],
-  "optimizedRoute": [
-    "node_0",
-    "node_5",
-    "node_4",
-    "node_3",
-    "node_1",
-    "node_2",
-    "node_0"
-  ],
-  "initialDistance": 6.9,
-  "optimizedDistance": 6.9,
-  "distanceSaved": 0.0,
-  "improvementPercent": 0.0,
-  "executionTimeMs": 0.185,
   "legs": [
     {
       "from": "node_0",
-      "to": "node_5",
-      "distanceKm": 1.2,
-      "pathNodes": ["node_0", "node_5"],
-      "coordinates": [
-        [37.7830, -122.4080],
-        [37.7795, -122.4185]
-      ]
+      "to": "node_2",
+      "distanceKm": 1.55,
+      "pathNodes": ["node_0", "j_1", "node_2"],
+      "coordinates": [[37.783, -122.408], [37.788, -122.403], [37.794, -122.402]]
     }
   ],
-  "fullRoadPath": [
-    "node_0",
-    "node_5",
-    "j_2",
-    "j_3",
-    "node_4",
-    "node_3",
-    "node_1",
-    "node_2",
-    "j_1",
-    "node_0"
-  ],
-  "fullCoordinates": [
-    [37.7830, -122.4080],
-    [37.7795, -122.4185],
-    [37.7845, -122.4040],
-    [37.7818, -122.4010],
-    [37.7820, -122.3940],
-    [37.7875, -122.3910],
-    [37.7915, -122.3990],
-    [37.7940, -122.4020],
-    [37.7880, -122.4030],
-    [37.7830, -122.4080]
-  ]
+  "fullRoadPath": ["node_0", "j_1", "node_2", "node_1", "node_3", "node_4", "j_3", "j_2", "node_0"],
+  "fullCoordinates": [[37.783, -122.408], [37.788, -122.403]],
+  "initialLegs": [],
+  "initialFullRoadPath": [],
+  "initialFullCoordinates": [],
+  "optimalLegs": [],
+  "optimalFullRoadPath": [],
+  "optimalFullCoordinates": []
 }
 ```
 
+| Field | Meaning |
+|---|---|
+| `initialRoute`, `initialDistance` | Nearest Neighbor tour |
+| `optimizedRoute`, `optimizedDistance` | Final heuristic tour: NN, then 2-Opt, then alternating Or-opt / 2-Opt |
+| `distanceSaved`, `improvementPercent` | Final tour compared with NN |
+| `stages` | Tour length after each stage |
+| `optimalRoute`, `optimalDistance`, `optimalityGapPercent` | Held-Karp exact optimum and the heuristic's gap to it. **`null` when there are more than 15 stops** |
+| `legs` / `initialLegs` / `optimalLegs` | Per-leg road geometry for each route variant (`optimalLegs` is `null` above 15 stops) |
+| `fullRoadPath`, `fullCoordinates` (and `initial*`, `optimal*`) | The whole route as road nodes and `[lat, lng]` pairs |
+| `executionTimeMs` | Engine time, including JSON parsing |
+
 ---
 
-## 4. Error Response Schema
-
-For malformed JSON, missing parameters, invalid node IDs, or unreachable vertices:
+## 4. Error Response
 
 ```json
 {
   "success": false,
-  "error": "Unreachable location detected: no road path exists between 'node_0' and 'node_island'"
+  "error": "Distance matrix build failed: Unreachable location detected: no road path exists between 'W' and 'ISLAND'"
 }
 ```
-Diagnostic details explaining the exact parser position or missing identifier are also printed directly to `stderr`.
+
+The HTTP API wraps errors as `{ "success": false, "error": "...", "code": "..." }`:
+
+| Status | `code` | Cause |
+|---|---|---|
+| 400 | `VALIDATION_ERROR` | Request failed schema or limit checks |
+| 400 | `ALGORITHM_ERROR` | Engine rejected the input (for example an unreachable stop) |
+| 400 | `JSON_SYNTAX_ERROR` | Body is not valid JSON |
+| 413 | `PAYLOAD_TOO_LARGE` | Body larger than `MAX_BODY_SIZE` |
+| 503 | `ENGINE_BUSY` | All engine slots and the wait queue are full; retry |
+| 504 | `PROCESS_TIMEOUT` | Engine exceeded `EXECUTION_TIMEOUT_MS` |
+| 500 | `EXECUTABLE_NOT_FOUND`, `ENGINE_START_FAILED`, `MALFORMED_ENGINE_OUTPUT`, `INTERNAL_ERROR` | Server-side problem (details only in server logs) |

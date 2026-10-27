@@ -20,9 +20,10 @@ Given:
 Find a closed tour starting at $w_0$, visiting each customer $c_i \in C$ at least once (or exactly once in the customer visit order), and returning to $w_0$, such that the total traversed road distance is minimized:
 $$\min \sum_{i=0}^{k} \text{dist}_G(v_i, v_{i+1}) \quad \text{where } v_0 = v_{k+1} = w_0, \{v_1, \ldots, v_k\} = C$$
 
-Since the Traveling Salesperson Problem is **NP-hard**, computing the exact global optimum becomes computationally intractable as $|C|$ grows. The engine therefore decomposes the problem into a two-phase architecture:
+Since the Traveling Salesperson Problem is **NP-hard**, computing the exact global optimum becomes computationally intractable as $|C|$ grows. The engine therefore decomposes the problem into three phases:
 1. **Shortest Path Road Metric Generation:** Exact all-pairs shortest paths via Dijkstra's algorithm.
-2. **Tour Construction & Improvement:** Greedy heuristic construction (Nearest Neighbor) followed by local search optimization (2-Opt).
+2. **Tour Construction & Improvement:** Greedy heuristic construction (Nearest Neighbor), then local search (2-Opt, followed by alternating Or-opt / 2-Opt until neither improves).
+3. **Exact Ground Truth (small instances):** Held-Karp dynamic programming computes the true optimum when $|C| \le 15$, so every response can report how far the heuristic tour is from optimal.
 
 ---
 
@@ -54,7 +55,7 @@ For each key location $s \in \{w_0\} \cup C$, Dijkstra's algorithm computes the 
 
 Let $K = |C| + 1$ denote the number of points of interest (warehouse + customers). We construct a symmetric distance matrix $D \in \mathbb{R}^{K \times K}$:
 $$D[i][j] = \text{dist}_G(v_i, v_j)$$
-Along with distance $D[i][j]$, the matrix caches the reconstructed road node sequence `roadPath[i][j]`.
+Alongside $D$, the matrix keeps each source's Dijkstra predecessor array (`parents[i]`, length $|V|$). The road node sequence for a leg $i \to j$ is rebuilt on demand by walking `parents[i]` back from $v_j$. This keeps memory at $O(K \cdot |V|)$ instead of $O(K^2 \cdot L)$ for caching every full path.
 
 - **Symmetry Verification:** Because $G$ is undirected, $D[i][j] = D[j][i]$. The implementation verifies this invariance with precision $\epsilon = 10^{-6}$.
 
@@ -83,10 +84,28 @@ Given tour $T = [v_0, v_1, \ldots, v_i, v_{i+1}, \ldots, v_j, v_{j+1}, \ldots, v
 #### $O(1)$ Delta Evaluation:
 Because $D$ is symmetric, reversing the segment $[v_{i+1}, \dots, v_j]$ preserves the internal sum of edge costs. The change in tour length $\Delta$ is calculated in $O(1)$ time:
 $$\Delta = (D[v_i][v_j] + D[v_{i+1}][v_{j+1}]) - (D[v_i][v_{i+1}] + D[v_j][v_{j+1}])$$
-If $\Delta < -\epsilon$, the reversal yields a strictly shorter tour. The algorithm applies the reversal and continues scanning until no improving 2-opt move exists (**local optimum**).
+If $\Delta < -\epsilon$ (with $\epsilon = 10^{-9}$), the reversal yields a strictly shorter tour. The algorithm applies the reversal in place and **keeps scanning the same pass** (it does not restart from $i = 1$). Passes repeat until a full pass finds no improving move, which is a 2-opt **local optimum**. A safety cap of 1000 passes is never reached on realistic inputs.
 
 #### Theoretical Limitation (Local Optimum vs. Global Optimum):
 > **Important:** 2-Opt is a **local search heuristic**. It explores the 2-exchange neighborhood of the current tour. When no 2-exchange can reduce the cost, 2-Opt terminates at a **2-optimal local minimum**. It **does not guarantee the global optimum**, as it cannot escape local minima that require 3-opt, k-opt, or non-improving transitional moves to untangle.
+
+### 3.5. Phase 3: Or-opt Local Search (Segment Relocation)
+
+Or-opt removes a segment of 1, 2 or 3 consecutive customer stops and reinserts it between two other consecutive stops, in either orientation. 2-Opt fixes crossings. Or-opt fixes a stop that sits on the wrong part of an otherwise good tour, a move 2-Opt can only make through several reversals.
+
+For segment $[v_i, \ldots, v_j]$ and insertion edge $(a, b)$:
+$$\text{gain}_{\text{remove}} = D[v_{i-1}][v_i] + D[v_j][v_{j+1}] - D[v_{i-1}][v_{j+1}]$$
+$$\text{cost}_{\text{insert}} = \min\big(D[a][v_i] + D[v_j][b],\; D[a][v_j] + D[v_i][b]\big) - D[a][b]$$
+The move is applied when $\text{cost}_{\text{insert}} - \text{gain}_{\text{remove}} < -\epsilon$. Both terms are $O(1)$, so one scan costs $O(K^2)$.
+
+The pipeline alternates the two operators: an Or-opt move can expose new 2-Opt moves and vice versa. It stops when Or-opt finds nothing, or when the 2-Opt sweep that follows changes nothing. The final tour is therefore locally optimal for **both** neighborhoods (this is asserted in the tests).
+
+### 3.6. Exact Reference: Held-Karp Dynamic Programming
+
+For $n = |C| \le 15$ customers the engine also computes the exact optimum:
+$$dp[S][j] = \min_{k \in S \setminus \{j\}} \big(dp[S \setminus \{j\}][k] + D[k][j]\big), \qquad dp[\{j\}][j] = D[w_0][j]$$
+$$\text{OPT} = \min_{j} \big(dp[C][j] + D[j][w_0]\big)$$
+Parent pointers rebuild the optimal visiting order. With $n = 15$ this is about $7.4 \times 10^6$ transitions and roughly 6 MB, a few milliseconds. Above the limit the exact fields in the response are `null`. Every response reports the **optimality gap** $(\text{Cost}(T_{\text{heuristic}}) - \text{OPT}) / \text{OPT} \times 100\%$.
 
 ---
 
@@ -101,14 +120,16 @@ Let:
 |---|---|---|---|---|
 | **Graph Construction** | Adjacency List | $O(\|V\| + \|E\|)$ | $O(\|V\| + \|E\|)$ | Efficient memory scaling for sparse road networks |
 | **Shortest Paths** | Dijkstra (Min-Heap) | $O(K \cdot (\|V\| + \|E\|) \log \|V\|)$ | $O(\|V\| + \|E\|)$ | Run once from each stop $s \in \{w_0\} \cup C$ |
-| **Distance Matrix** | All-Pairs Matrix | $O(K^2)$ | $O(K^2)$ | Caches distances and parent paths |
+| **Distance Matrix** | All-Pairs Matrix | $O(K^2)$ | $O(K^2 + K \cdot \|V\|)$ | Distances plus one predecessor array per stop |
 | **Tour Construction** | Nearest Neighbor | $O(K^2)$ | $O(K)$ | Greedy selection across unvisited stops |
-| **Tour Improvement** | 2-Opt Local Search | $O(M \cdot K^2)$ | $O(K)$ | $M$ = number of improving iterations ($M \le 1000$) |
-| **Path Expansion** | Road Node Sequencing | $O(L)$ | $O(L)$ | $L$ = total road nodes in complete tour ($L \le \|V\|$) |
-| **Total Engine Pipeline** | Combined | $O(K (\|V\| + \|E\|)\log \|V\| + M K^2)$ | $O(\|V\| + \|E\| + K^2)$ | Execution typically under 1 ms for $K \le 20$ |
+| **Tour Improvement** | 2-Opt Local Search | $O(P \cdot K^2)$ | $O(K)$ | $P$ = number of passes until no improving move |
+| **Tour Improvement** | Or-opt (alternating with 2-Opt) | $O(M \cdot K^2)$ | $O(K)$ | $M$ = number of applied moves; rescans after each move |
+| **Exact Reference** | Held-Karp DP | $O(2^n \cdot n^2)$ | $O(2^n \cdot n)$ | Only when $n = K - 1 \le 15$ |
+| **Path Expansion** | Road Node Sequencing | $O(L)$ | $O(L)$ | $L$ = total road nodes in complete tour |
+| **Total Engine Pipeline** | Combined | $O(K (\|V\| + \|E\|)\log \|V\| + (P + M) K^2)$ | $O(\|V\| + \|E\| + K \cdot \|V\|)$ | See the benchmark table in the README |
 
 ### Comparison: Brute-Force Exact Reference Solver (Test Harness)
-In the test suite (`test_algorithms.cpp`), an exact reference solver computes all $(K-1)! / 2$ permutations:
+In the test suite (`test_algorithms.cpp`), an exact reference solver enumerates all $(K-1)!$ customer permutations. It is used to verify Held-Karp on instances with up to 8 customers:
 - **Time Complexity:** $O((K-1)! \cdot K)$
 - **Space Complexity:** $O(K)$
 - **Practical Limit:** $K \le 10$. For $K = 5$, $(5-1)! = 24$ permutations (instantaneous). For $K = 20$, $(19)! \approx 1.21 \times 10^{17}$ operations (impossible in human lifetime). This illustrates why heuristic and local search approximations (NN + 2-Opt) are essential for real-world delivery routing.
@@ -119,8 +140,8 @@ In the test suite (`test_algorithms.cpp`), an exact reference solver computes al
 
 1. **Tour Closed Cycle:** $T[0] = w_0$ and $T[|T|-1] = w_0$.
 2. **Every Stop Visited Exactly Once:** For all $c \in C$, $|\{i \mid T[i] = c\}| = 1$.
-3. **Monotonic Improvement:**
-   $$\text{Cost}(T_{\text{2-opt}}) \le \text{Cost}(T_{\text{NN}})$$
+3. **Monotonic Improvement and Optimality Bound:**
+   $$\text{OPT} \le \text{Cost}(T_{\text{final}}) \le \text{Cost}(T_{\text{2-opt}}) \le \text{Cost}(T_{\text{NN}})$$
 4. **Distance Saved:**
    $$\Delta_{\text{saved}} = \text{Cost}(T_{\text{NN}}) - \text{Cost}(T_{\text{2-opt}}) \ge 0$$
 5. **Percentage Improvement:**
