@@ -7,7 +7,7 @@ The project is tested at four layers. All of them run with `npm test` and in CI 
 | C++ algorithm core | `algorithms/tests/test_algorithms.cpp` | CTest | `npm run test:cpp` |
 | Backend API | `backend/tests/api.test.js` | `node:test` | `npm run test:backend` |
 | Frontend graph utils | `frontend/src/utils/customStops.test.js` | `node:test` | `npm run test:frontend` |
-| End-to-end | `scripts/e2e.test.js` | `node:test` | `npm run test:e2e` |
+| End-to-end | `scripts/e2e.test.js` | `node:test` | `npm run test:e2e` (includes a 3-van plan on the real Connaught Place network) |
 
 CI also runs the C++ suite under AddressSanitizer + UndefinedBehaviorSanitizer, and smoke-tests the Docker image.
 
@@ -19,7 +19,7 @@ CTest registers three tests:
 
 | CTest name | What it runs |
 |---|---|
-| `algorithm_unit_tests` | `test_runner`: 15 suites, 601 assertions |
+| `algorithm_unit_tests` | `test_runner`: 16 suites, 1168 assertions |
 | `engine_cli_sample_input` | `optimizer_engine --file data/sample-input.json` must exit 0 |
 | `engine_cli_missing_file_fails` | `optimizer_engine --file <missing>` must exit non-zero |
 
@@ -43,19 +43,22 @@ CTest registers three tests:
 | 14 | `testStrictJsonSchema` | Missing `distance_km`, legacy aliases, object stops, `1e999` | Descriptive errors instead of silent defaults or crashes |
 | 15 | `testJsonParserAndOptimalFields` | `-`, 10 000-deep nesting, `\u` escapes and surrogate pairs, 16-stop request | Parser errors (no crash), UTF-8 decoding, optimal fields present for small inputs and `null` above the limit |
 
+| 16 | `testFleetSplit` | Two-arm graph with 2, 3 and 5 vans; 12 random 12-stop instances with 2 to 4 vans; JSON `vehicles` | Exact arm split (4 km each); a van that cannot help stays home; every stop served once; longest route <= baseline, <= one van, <= best brute-force cut of the tour; each route is 2-Opt optimal; bad `vehicles` values rejected; `fleet` is `null` for one van |
+
 Suite 11 also prints how often the heuristic reached the exact optimum (28/30, mean gap 0.04%).
 
 ---
 
 ## 2. Backend API (`backend/tests/api.test.js`)
 
-17 tests. The Express app listens on a random port, and requests run against the real C++ engine.
+19 tests. The Express app listens on a random port, and requests run against the real C++ engine.
 
 | Group | Test | Expected |
 |---|---|---|
 | Health | Binary present, path not exposed | `200`, `executable.exists === true`, no `executable.path` |
 | Health | CORS and headers | `Access-Control-Allow-Origin: http://localhost:3000`, no `X-Powered-By` |
 | Engine | Sample graph (`data/sample-input.json`) | `5.45 -> 5.10 km`, exact routes, 5 legs, optimum `5.10`, gap `0`, stages `[5.45, 5.1, 5.1]` |
+| Engine | Sample graph with `vehicles: 2` | `fleet` present (`null` for one van); every stop served by exactly one van; routes start/end at the depot; optimized longest <= baseline longest |
 | Engine | Unreachable stop | `400 ALGORITHM_ERROR` |
 | Engine | Job pool and queue full | `503 ENGINE_BUSY` |
 | Validation | Missing warehouse | `400 VALIDATION_ERROR` |
@@ -66,6 +69,7 @@ Suite 11 also prints how often the heuristic reached the exact optimum (28/30, m
 | Validation | Object-shaped stops | `400` |
 | Validation | `1e400` distance (Infinity after `JSON.parse`) | `400` |
 | Validation | Latitude 91 | `400` |
+| Validation | `vehicles` of 0, 11, 1.5 or `"2"` | `400`, message names `vehicles` |
 | Validation | More than `MAX_STOPS` stops | `400` |
 | Errors | Malformed JSON | `400 JSON_SYNTAX_ERROR` |
 | Errors | 3 MB body | `413 PAYLOAD_TOO_LARGE` |
@@ -85,3 +89,4 @@ Starts `backend/src/app.js` as a separate process on a free port, so each reques
 | E2E-04 | Malformed JSON | `400 JSON_SYNTAX_ERROR` |
 | E2E-05 | 8 concurrent requests (repeated clicks) | All `200`, identical distances |
 | E2E-06 | Full response check | All three routes (initial, optimized, optimal) start and end at the warehouse and visit every stop; `optimal <= optimized <= initial`; saved/percent formulas hold; **every step of every leg is a real road**, leg lengths equal their edge sums, legs sum to the tour distance, coordinates match the nodes |
+| E2E-07 | 3 vans on the real Connaught Place network | Baseline and optimized plans each serve every stop exactly once, every leg follows real roads, `longestRoute` matches the routes, optimized longest < baseline longest < one van |

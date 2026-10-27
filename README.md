@@ -21,13 +21,17 @@ Formally, this is the **Metric Traveling Salesperson Problem (TSP)** over the sh
 3. **2-Opt local search** untangles crossings by reversing tour segments.
 4. **Or-opt local search** relocates segments of 1 to 3 stops. It alternates with 2-Opt until neither improves the tour.
 5. **Held-Karp dynamic programming** computes the exact optimum for up to 15 stops. The response reports how far the heuristic is from optimal.
+6. **Multi-van split (route first, cluster second):** with several vans, a dynamic program cuts the best tour into one route per van so the longest route is as short as possible, then single stops move between vans while that shortens the longest route. All deliveries finish sooner.
 
 ---
 
 ## 2. Key Features
 
-- **Pure algorithmic core:** no external map APIs. Every road and route geometry comes from the input graph.
-- **Native SVG city map:** full-screen map with pan and zoom, roads and street names drawn from the graph edges, depot and numbered stop markers, direction arrows and an animated vehicle. Click (or Enter/Space on) any location to add or remove it as a stop. **+ Add stop** lets you drop new stops anywhere on the map; each one is wired onto its nearest road, so routes still follow real streets.
+- **Own routing, no routing APIs:** every route is computed by the C++ engine from the road graph. Map tiles are only the background picture.
+- **Real city maps:** two presets use real OpenStreetMap road networks (Connaught Place, New Delhi and Koramangala, Bengaluru) with real shops and offices as stops, drawn on map tiles. Three small illustrated graphs remain for teaching.
+- **Several delivery vans:** pick 1 to 5 vans. Each van gets its own coloured route, numbered stops and manifest, and all vans drive together in the playback.
+- **Clear before / after:** the "before" route (Nearest Neighbor, or for vans the Nearest Neighbor tour cut into equal parts) is drawn faintly under the optimized one, with the saving in km and %.
+- **Native SVG city map:** full-screen map with pan and zoom, depot and numbered stop markers, direction arrows and animated vehicles. Click (or Enter/Space on) any location to add or remove it as a stop. **+ Add stop** lets you drop new stops anywhere on the map; each one is wired onto its nearest road, so routes still follow real streets.
 - **Responsive and accessible UI:** floating planner panel on desktop and a bottom sheet on phones; keyboard-operable map nodes and controls; reduced-motion support.
 - **Three-way route comparison:** Nearest Neighbor vs optimized (2-Opt + Or-opt) vs exact optimum (Held-Karp).
 - **Live metrics:** initial and optimized distance, distance saved, improvement %, optimality gap and engine latency.
@@ -77,7 +81,8 @@ Formally, this is the **Metric Traveling Salesperson Problem (TSP)** over the sh
 │   3. Nearest Neighbor tour construction                │
 │   4. 2-Opt + Or-opt local search (O(1) move deltas)    │
 │   5. Held-Karp exact optimum (≤ 15 stops)              │
-│   6. Road-level path and coordinate expansion          │
+│   6. Multi-van split + balancing (vehicles > 1)        │
+│   7. Road-level path and coordinate expansion          │
 └────────────────────────────────────────────────────────┘
 ```
 
@@ -96,6 +101,7 @@ Let $|V|$ = intersections, $|E|$ = road segments, $K = |C| + 1$ = stops includin
 | Tour construction | Nearest Neighbor | $O(K^2)$ | $O(K)$ |
 | Tour improvement | 2-Opt, Or-opt | $O(K^2)$ per pass / move | $O(K)$ |
 | Exact reference | Held-Karp | $O(2^n n^2)$, only $n \le 15$ | $O(2^n n)$ |
+| Multi-van split | Split DP over cut points, $V$ vans | $O(V n^2)$, plus $O(n^2)$ per balancing move | $O(V n)$ |
 | Path expansion | Leg concatenation | $O(L)$, $L$ = road nodes on the route | $O(L)$ |
 
 Full derivations: [docs/algorithm-design.md](docs/algorithm-design.md).
@@ -125,16 +131,17 @@ Takeaways: local search saves 6–20% over Nearest Neighbor, and the savings gro
 route_opti/
 ├── algorithms/                 # C++17 optimization engine (CMake)
 │   ├── include/ src/           # Graph, Dijkstra, DistanceMatrix, NearestNeighbor, TwoOpt,
-│   │                           # OrOpt, HeldKarp, Optimizer, Json, JsonInterface, main
+│   │                           # OrOpt, HeldKarp, Fleet, Optimizer, Json, JsonInterface, main
 │   ├── tests/                  # CTest suite (unit + randomized property tests)
 │   └── CMakeLists.txt
 ├── backend/                    # Express API (bridge to the engine)
 │   ├── src/                    # app.js, config.js, routes/, services/cppRunner.js, validators/
 │   └── tests/api.test.js       # node:test API tests
 ├── frontend/                   # React + Vite + Tailwind dashboard
+│   └── public/cities/          # real OpenStreetMap city presets (generated)
 ├── data/                       # sample-input.json and the engine's sample-output.json
 ├── docs/                       # algorithm design, JSON interface, architecture, test catalog
-├── scripts/                    # e2e.test.js, benchmark.js
+├── scripts/                    # e2e.test.js, benchmark.js, build-city-presets.mjs
 ├── .github/                    # CI workflow, Dependabot
 ├── Dockerfile
 └── package.json                # npm workspaces root (backend, frontend)
@@ -184,6 +191,14 @@ algorithms/build/optimizer_engine --file data/sample-input.json
 algorithms/build/optimizer_engine --demo
 ```
 See [docs/json-interface.md](docs/json-interface.md) for modes and exit codes.
+
+### Real city presets
+The files in `frontend/public/cities/` are generated from OpenStreetMap and committed. To rebuild them (needs internet):
+```bash
+node scripts/build-city-presets.mjs                # downloads from the Overpass API
+node scripts/build-city-presets.mjs --cache osm/   # reuse / save raw downloads in osm/
+```
+The script keeps drivable roads, simplifies their geometry, and wires the depot and 20 named places onto the nearest roads. Map data © OpenStreetMap contributors, available under the [ODbL](https://www.openstreetmap.org/copyright).
 
 ### Configuration (environment variables)
 
@@ -260,9 +275,10 @@ npm run bench          # benchmark table above
 
 | Suite | Scope |
 |---|---|
-| C++ `ctest` | 15 suites / 601 assertions: Dijkstra, unreachable nodes, NN/2-Opt/Or-opt invariants, Held-Karp vs brute force, randomized property tests, strict JSON schema, parser robustness. Also CLI exit-code tests |
-| Backend API | 17 tests: validation (aliases, Infinity, limits), error mapping (400/404/413/503), real engine results |
-| End-to-end | 6 tests against a separately started server: concurrency, and **every leg of every route follows real road edges** |
+| C++ `ctest` | 16 suites / 1168 assertions: Dijkstra, unreachable nodes, NN/2-Opt/Or-opt invariants, Held-Karp vs brute force, multi-van split vs brute force, randomized property tests, strict JSON schema, parser robustness. Also CLI exit-code tests |
+| Backend API | 19 tests: validation (aliases, Infinity, limits, vehicles), error mapping (400/404/413/503), real engine results, fleet plan |
+| Frontend utils | 4 tests: wiring user-added stops onto the nearest road |
+| End-to-end | 7 tests against a separately started server: concurrency, **every leg of every route follows real road edges**, and a 3-van plan on the real Connaught Place network |
 
 CI also runs the C++ tests under ASan + UBSan and smoke-tests the Docker image. Full catalog: [docs/test-cases.md](docs/test-cases.md).
 
@@ -270,17 +286,20 @@ CI also runs the C++ tests under ASan + UBSan and smoke-tests the Docker image. 
 
 ## 12. Known Limitations
 
-1. **Static graph:** traffic, turn penalties and one-way streets are not modeled. Directed edges would break the symmetric $O(1)$ 2-Opt delta, which assumes $D[u][v] = D[v][u]$.
+1. **Static graph:** traffic, turn penalties and one-way streets are not modeled (the real city presets treat every road as two-way). Directed edges would break the symmetric $O(1)$ 2-Opt delta, which assumes $D[u][v] = D[v][u]$.
 2. **Heuristic above 15 stops:** the optimality gap is reported only where Held-Karp is feasible.
-3. **Single vehicle:** one vehicle with unlimited capacity. Multi-vehicle routing with capacities or time windows (VRP / VRPTW) is out of scope.
+3. **Vans without capacity or time windows:** the multi-van plan balances route length only. The split is exact for one stop order, and the balancing is a local search, so the plan is not proven optimal.
+4. **Map tiles:** the background comes from Esri's public World Light Gray Canvas service, which needs no key but is meant for light, non-commercial use. A production deployment should use a keyed tile provider or self-hosted tiles.
 
 ---
 
 ## 13. Instructions for Report Screenshots
 
-1. **Dashboard overview:** open `http://localhost:3000` (or `http://localhost:5001` after `npm run build:frontend && npm start`). Pick **"Downtown Metro Grid"** with the default 4 stops. Capture the route planner panel (status "Engine ready"), the map and the legend.
-2. **Optimization result:** click **"Optimize Route"**. Capture the route on the map and the results panel: 5.10 km, 350 m (6.4%) shorter than Nearest Neighbor, 0.0% optimality gap, and the Stages bars.
-3. **Algorithm comparison:** under "Route on map", switch between **Nearest Neighbor**, **Optimized (2-Opt + Or-opt)** and **Optimal (Held-Karp)** to show the segment reversal. The Manifest lists each leg with running totals.
-4. **Custom stops:** click map locations to add or remove stops, or press **+ Add stop** and click empty map to drop new ones (Reset / Clear in the panel), then optimize again.
-5. **Simulation replay:** press Play on the scrubber at the bottom to show the animated vehicle.
-6. **Benchmark & tests:** run `npm run bench` and `npm test` and capture the terminal output.
+1. **Dashboard overview:** open `http://localhost:3000` (or `http://localhost:5001` after `npm run build:frontend && npm start`). The default area is **"New Delhi · Connaught Place (real map)"** with 12 stops on the real street map. Capture the route planner panel (status "Engine ready"), the map and the legend.
+2. **One van:** click **"Optimize Route"**. Capture the route and the results panel: 10.11 km, 2.46 km (19.6%) shorter than Nearest Neighbor, 0.0% optimality gap, the Stages bars, and the dotted "before" route under the optimized one. The Manifest lists every stop with the streets taken.
+3. **Several vans:** choose **3** under "Delivery vans" and click **"Optimize 3 van routes"**. Capture the three coloured routes and the panel: the longest van route drops from 7.90 km (greedy equal split) to 5.22 km (34.0%), against 10.11 km for one van.
+4. **Algorithm comparison:** under "Route on map", switch between the before and optimized views (and **Optimal (Held-Karp)** with one van). Untick "Show the before route underneath" for a clean map.
+5. **Custom stops:** click map locations to add or remove stops, or press **+ Add stop** and click empty map to drop new ones (Reset / Clear in the panel), then optimize again.
+6. **Simulation replay:** press Play on the scrubber at the bottom; with several vans they all drive at once and the shorter routes finish first.
+7. **Teaching graph:** pick **"Downtown Metro Grid"** for the small illustrated example: 5.45 km → 5.10 km (6.4%).
+8. **Benchmark & tests:** run `npm run bench` and `npm test` and capture the terminal output.

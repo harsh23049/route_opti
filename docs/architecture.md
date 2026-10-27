@@ -21,6 +21,7 @@ This project is an academic Algorithms mini-project focused on demonstrating cla
   - **Nearest Neighbor Heuristic:** Greedy initial delivery tour construction.
   - **2-Opt and Or-opt Local Search:** Segment reversal and segment relocation until neither improves.
   - **Held-Karp DP:** Exact optimum for up to 15 stops, reported as the optimality gap.
+  - **Fleet split:** With several vans, a split DP cuts the best tour into one route per van (minimizing the longest), then an inter-route relocate pass balances them.
 - **Interface:** One JSON request on stdin, one JSON response on stdout, exit code mirrors success (see `docs/json-interface.md`).
 
 ### `backend/` (Node.js + Express API)
@@ -34,9 +35,10 @@ This project is an academic Algorithms mini-project focused on demonstrating cla
 ### `frontend/` (React + Vite + Tailwind CSS)
 - **Role:** Interactive operator dashboard.
 - **Responsibilities:**
-  - Renders the simulated street network and nodes in native SVG.
-  - Lets the user choose delivery stops and compare the Nearest Neighbor, optimized and optimal routes.
-  - Shows metrics (distance, savings, optimality gap, engine latency) and replays vehicle progress.
+  - Renders the map in native SVG: real-city presets on Web Mercator map tiles (Esri World Light Gray Canvas), the teaching graphs on an illustrated basemap.
+  - Loads real-city presets (`public/cities/*.json`, built from OpenStreetMap by `scripts/build-city-presets.mjs`) on first use.
+  - Lets the user choose or add delivery stops, pick 1 to 5 vans, and compare the before route with the optimized (and, for one van, the optimal) route.
+  - Shows metrics (distance, savings, optimality gap, per-van lengths, engine latency) and replays all vans driving at once.
 
 ### `data/`
 - `sample-input.json` / `sample-output.json`: a request and the engine's real response, used by tests and docs.
@@ -44,6 +46,7 @@ This project is an academic Algorithms mini-project focused on demonstrating cla
 ### `scripts/`
 - `e2e.test.js`: end-to-end tests against a separately started backend process.
 - `benchmark.js`: seeded random-city benchmark (NN vs 2-Opt vs Or-opt vs optimum, latency).
+- `build-city-presets.mjs`: downloads OpenStreetMap roads and places from the Overpass API and writes the real-city presets.
 
 ### `docs/`
 - Algorithm design and complexity, JSON interface, and test catalog.

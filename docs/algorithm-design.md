@@ -109,6 +109,17 @@ Parent pointers rebuild the optimal visiting order. With $n = 15$ this is about 
 
 ---
 
+### 3.7. Multi-Van Split: Route First, Cluster Second
+With $V$ vans the goal is to finish all deliveries soonest: minimize the **longest** van route. (Total distance alone always prefers one van, because splitting a tour never makes it shorter under the triangle inequality.)
+
+1. **Giant tour:** take the best single-van tour (Held-Karp's when available, else the 2-Opt + Or-opt tour) and the Nearest Neighbor tour as candidates.
+2. **Split (Beasley 1983; Prins 2004, min-max form):** for a giant tour $s_1, \dots, s_n$, let $c(i, j)$ be the trip depot $\to s_i \to \dots \to s_j \to$ depot. Then
+   $f_t(j) = \min_{i < j} \max\big(f_{t-1}(i),\ c(i+1, j)\big)$ with $f_0(0) = 0$, ties broken toward a smaller total. The best $f_t(n)$ over $t \le V$ is the optimal cut of that stop order. Prefix sums make each $c(i, j)$ an $O(1)$ lookup, so the split is $O(V n^2)$.
+3. **Re-optimize** every trip with 2-Opt and Or-opt.
+4. **Balance (inter-route relocate):** move one stop off the longest trip to the cheapest position in another trip whenever both end up shorter than the old longest trip; re-optimize both and repeat. Each move strictly lowers the longest trip or the number of trips at that length, so it terminates.
+
+Because the Nearest Neighbor tour is a candidate and its equal-parts cut is one of the cuts the DP considers, the plan is never worse than the baseline. The split is exact only for the given stop order and the balancing is a local search, so the plan is a heuristic, not a proven optimum.
+
 ## 4. Complexity Analysis
 
 Let:

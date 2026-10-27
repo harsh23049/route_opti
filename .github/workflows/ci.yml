@@ -35,7 +35,7 @@ jobs:
           cmake -S algorithms -B algorithms/build -DCMAKE_BUILD_TYPE=Release
           -DROUTE_OPTI_WERROR=${{ runner.os == 'Linux' && 'ON' || 'OFF' }}
           && cmake --build algorithms/build --config Release --parallel
-      - name: Test (C++ + backend API + end-to-end)
+      - name: Test (C++, backend API, frontend utils, end-to-end)
         run: npm test
       - name: Build frontend
         run: npm run build:frontend

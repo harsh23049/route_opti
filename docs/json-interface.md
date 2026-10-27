@@ -45,7 +45,8 @@ The schema is strict. Unknown aliases (`warehouseId`, `depot`, `deliveryStops`, 
     { "source": "W",  "target": "S1", "distance_km": 1.5, "street_name": "Main St" },
     { "source": "S1", "target": "S2", "distance_km": 0.4 },
     { "source": "S2", "target": "W",  "distance_km": 1.8 }
-  ]
+  ],
+  "vehicles": 1
 }
 ```
 
@@ -59,6 +60,7 @@ The schema is strict. Unknown aliases (`warehouseId`, `depot`, `deliveryStops`, 
 | `roads[].source`, `target` | string | Existing node IDs. Roads are undirected |
 | `roads[].distance_km` | number | Finite and `>= 0` |
 | `roads[].street_name` | string, optional | |
+| `vehicles` | integer, optional | `1` to `10`, default `1`. More than one adds the `fleet` block to the response |
 
 **API limits** (configurable, see the README): 5000 nodes, 20000 roads, 100 stops, 2 MB body.
 
@@ -116,6 +118,34 @@ Response for `data/sample-input.json` (shortened; the full file is `data/sample-
 | `legs` / `initialLegs` / `optimalLegs` | Per-leg road geometry for each route variant (`optimalLegs` is `null` above 15 stops) |
 | `fullRoadPath`, `fullCoordinates` (and `initial*`, `optimal*`) | The whole route as road nodes and `[lat, lng]` pairs |
 | `executionTimeMs` | Engine time, including JSON parsing |
+| `vehicles` | Number of vans requested |
+| `fleet` | Multi-van plan, or `null` for one van (see below) |
+
+### Multi-van plan (`vehicles` > 1)
+
+```json
+"fleet": {
+  "baseline":  { "totalDistance": 19.28, "longestRoute": 7.90, "routes": [] },
+  "optimized": {
+    "totalDistance": 15.36,
+    "longestRoute": 5.22,
+    "routes": [
+      { "vehicle": 1, "route": ["W", "S12", "S2", "W"], "distance": 5.14,
+        "legs": [], "fullRoadPath": [], "fullCoordinates": [] }
+    ]
+  },
+  "longestRouteSaved": 2.68,
+  "improvementPercent": 33.96
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `baseline` | The Nearest Neighbor tour cut into equal consecutive parts, one per van, not re-optimized |
+| `optimized` | Route-first cluster-second split with balancing (see the algorithm design). Vans that would get no stop are left out, so `routes` can be shorter than `vehicles` |
+| `routes[]` | One closed depot-to-depot route per van, with the same leg and geometry fields as the single-van routes |
+| `longestRoute`, `totalDistance` | The longest van route (when all deliveries are done) and the sum over all vans |
+| `longestRouteSaved`, `improvementPercent` | Optimized longest route compared with the baseline's |
 
 ---
 
