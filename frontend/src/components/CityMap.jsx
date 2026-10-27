@@ -1,24 +1,82 @@
-import React, { useMemo } from 'react';
+import { useMemo, useCallback, useEffect, useRef, useState } from 'react';
+import { LINE_STYLES, ACCENT } from '../utils/routeView';
+
+const LABEL_SIZE = 12.5;
+const ROAD_LABEL_SIZE = 10.5;
+const textWidth = (s, size) => s.length * size * 0.56;
+const hits = (a, list) => list.some((b) => a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y);
+
+function seeded(seed) {
+  let s = seed >>> 0 || 1;
+  return () => {
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+    return s / 4294967296;
+  };
+}
+
+function segDist(px, py, ax, ay, bx, by) {
+  const dx = bx - ax, dy = by - ay;
+  const t = Math.max(0, Math.min(1, ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy || 1)));
+  return Math.hypot(px - (ax + t * dx), py - (ay + t * dy));
+}
+
+// Vehicle position by travelled length along the polyline.
+function vehicleAt(points, progress) {
+  if (points.length < 2) return null;
+  const seg = [];
+  let total = 0;
+  for (let i = 1; i < points.length; i++) {
+    const d = Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+    seg.push(d);
+    total += d;
+  }
+  let target = Math.min(1, Math.max(0, progress)) * total;
+  for (let i = 0; i < seg.length; i++) {
+    if (target <= seg[i] || i === seg.length - 1) {
+      const f = seg[i] ? Math.min(1, target / seg[i]) : 0;
+      const a = points[i], b = points[i + 1];
+      return { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f };
+    }
+    target -= seg[i];
+  }
+  return null;
+}
 
 /**
- * CityMap renders an interactive SVG simulated city map.
- * Invariants:
- * 1. Road lines are generated directly from the same graph roads submitted to C++.
- * 2. Route polylines follow actual shortest-path graph coordinates returned by C++.
- * 3. Warehouse/start marker is prominently highlighted.
- * 4. Customer stops are rendered as numbered red markers indicating dispatch order.
- * 5. Delivery route is rendered as a vibrant cyan line with an animated delivery van.
+ * Full-bleed SVG city map. Roads come from the same graph sent to the backend;
+ * the route line uses the coordinates returned by the backend for the active view.
+ * Clicking a non-warehouse node toggles it as a stop.
  */
 export default function CityMap({
   graph,
-  activeRouteData,
-  activeAlgorithm = 'two_opt', // 'nearest_neighbor' or 'two_opt'
-  simulationProgress = 0, // 0.0 to 1.0
+  selectedStops,
+  routeView,
+  hasRoute,
+  simulationProgress = 0,
+  isPlaying,
   selectedNodeId,
-  onSelectNode
+  hoveredNodeId,
+  onToggleStop,
+  togglingDisabled,
+  insets
 }) {
-  const nodes = graph?.nodes || [];
-  const roads = graph?.roads || [];
+  const wrapRef = useRef(null);
+  const dragRef = useRef(null);
+  const [size, setSize] = useState({ w: 1200, h: 800 });
+  const [zoom, setZoom] = useState({ k: 1, x: 0, y: 0 });
+
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return undefined;
+    const update = () => setSize({ w: el.clientWidth || 1200, h: el.clientHeight || 800 });
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const nodes = useMemo(() => graph?.nodes || [], [graph]);
+  const roads = useMemo(() => graph?.roads || [], [graph]);
   const warehouseId = graph?.warehouse || 'W';
 
   const nodeMap = useMemo(() => {
@@ -27,396 +85,446 @@ export default function CityMap({
     return map;
   }, [nodes]);
 
-  // SVG canvas dimensions
-  const SVG_WIDTH = 840;
-  const SVG_HEIGHT = 560;
-  const PADDING = 55;
-
-  // Compute coordinate bounding box
   const bounds = useMemo(() => {
-    if (nodes.length === 0) {
-      return { minLat: 37.77, maxLat: 37.80, minLng: -122.42, maxLng: -122.39 };
-    }
-    let minLat = Infinity, maxLat = -Infinity;
-    let minLng = Infinity, maxLng = -Infinity;
-
+    if (nodes.length === 0) return { minLat: 37.77, maxLat: 37.8, minLng: -122.42, maxLng: -122.39 };
+    let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
     nodes.forEach((n) => {
-      if (n.lat < minLat) minLat = n.lat;
-      if (n.lat > maxLat) maxLat = n.lat;
-      if (n.lng < minLng) minLng = n.lng;
-      if (n.lng > maxLng) maxLng = n.lng;
+      minLat = Math.min(minLat, n.lat);
+      maxLat = Math.max(maxLat, n.lat);
+      minLng = Math.min(minLng, n.lng);
+      maxLng = Math.max(maxLng, n.lng);
     });
-
-    const latDelta = maxLat - minLat || 0.005;
-    const lngDelta = maxLng - minLng || 0.005;
-
-    return {
-      minLat: minLat - latDelta * 0.05,
-      maxLat: maxLat + latDelta * 0.05,
-      minLng: minLng - lngDelta * 0.05,
-      maxLng: maxLng + lngDelta * 0.05
-    };
+    return { minLat, maxLat, minLng, maxLng };
   }, [nodes]);
 
-  // Project geographic coordinates (lat, lng) to SVG canvas coordinates (x, y)
-  const project = (lat, lng) => {
-    const latSpan = bounds.maxLat - bounds.minLat || 0.01;
-    const lngSpan = bounds.maxLng - bounds.minLng || 0.01;
-
-    const x = PADDING + ((lng - bounds.minLng) / lngSpan) * (SVG_WIDTH - 2 * PADDING);
-    // Invert Y axis so higher latitude is at the top of the map
-    const y = SVG_HEIGHT - (PADDING + ((lat - bounds.minLat) / latSpan) * (SVG_HEIGHT - 2 * PADDING));
-
-    return { x, y };
+  const ins = insets || { left: 40, top: 40, right: 40, bottom: 40 };
+  const safe = {
+    x: ins.left,
+    y: ins.top,
+    w: Math.max(120, size.w - ins.left - ins.right),
+    h: Math.max(120, size.h - ins.top - ins.bottom)
   };
 
-  // Determine active ordered stop sequence based on selected algorithm view
-  const activeStopSequence = useMemo(() => {
-    if (!activeRouteData) return [];
-    if (activeAlgorithm === 'nearest_neighbor') {
-      return activeRouteData.initialRoute || [];
-    }
-    return activeRouteData.optimizedRoute || [];
-  }, [activeRouteData, activeAlgorithm]);
+  const project = useCallback(
+    (lat, lng) => {
+      const kx = Math.cos((((bounds.minLat + bounds.maxLat) / 2) * Math.PI) / 180);
+      const spanX = (bounds.maxLng - bounds.minLng) * kx || 0.01;
+      const spanY = bounds.maxLat - bounds.minLat || 0.01;
+      const s = Math.min(safe.w / spanX, safe.h / spanY);
+      const ox = safe.x + (safe.w - spanX * s) / 2;
+      const oy = safe.y + (safe.h - spanY * s) / 2;
+      const bx = ox + (lng - bounds.minLng) * kx * s;
+      const by = oy + (bounds.maxLat - lat) * s;
+      const cx = safe.x + safe.w / 2;
+      const cy = safe.y + safe.h / 2;
+      return { x: cx + (bx - cx) * zoom.k + zoom.x, y: cy + (by - cy) * zoom.k + zoom.y };
+    },
+    [bounds, safe.x, safe.y, safe.w, safe.h, zoom]
+  );
 
-  // Build map of customer stop visit sequence numbers (1-based, excluding warehouse)
-  const stopVisitNumberMap = useMemo(() => {
-    const orderMap = new Map();
-    let counter = 1;
-    activeStopSequence.forEach((id) => {
-      if (id !== warehouseId && !orderMap.has(id)) {
-        orderMap.set(id, counter++);
+  // Normalised (u = east, v = north, 0..1 over the node bounds) -> screen.
+  const projN = useCallback(
+    (u, v) =>
+      project(
+        bounds.minLat + v * (bounds.maxLat - bounds.minLat),
+        bounds.minLng + u * (bounds.maxLng - bounds.minLng)
+      ),
+    [project, bounds]
+  );
+
+  // Decorative basemap features, deterministic per graph.
+  const decor = useMemo(() => {
+    const latS = bounds.maxLat - bounds.minLat || 0.01;
+    const lngS = bounds.maxLng - bounds.minLng || 0.01;
+    const norm = (n) => [(n.lng - bounds.minLng) / lngS, (n.lat - bounds.minLat) / latS];
+    const pts = nodes.map(norm);
+    const segs = roads
+      .map((r) => [nodeMap.get(r.source), nodeMap.get(r.target)])
+      .filter(([a, b]) => a && b)
+      .map(([a, b]) => [...norm(a), ...norm(b)]);
+    const parks = [];
+    const cands = [];
+    for (let u = 0.1; u < 0.95; u += 0.1) {
+      for (let v = 0.1; v < 0.95; v += 0.1) {
+        const dn = Math.min(...pts.map(([a, b]) => Math.hypot(a - u, b - v)));
+        const dr = Math.min(...segs.map(([a, b, c, d]) => segDist(u, v, a, b, c, d)));
+        if (dn > 0.17 && dr > 0.08) cands.push({ u, v, score: Math.min(dn, dr * 2) });
       }
-    });
-    return orderMap;
-  }, [activeStopSequence, warehouseId]);
-
-  // Compute actual route polyline points from C++ response
-  const routePolylinePoints = useMemo(() => {
-    if (!activeRouteData) return [];
-
-    const isNN = activeAlgorithm === 'nearest_neighbor';
-    let rawCoords = isNN
-      ? (activeRouteData.initialFullCoordinates || [])
-      : (activeRouteData.fullCoordinates || []);
-
-    if (rawCoords.length === 0) {
-      const sourceLegs = isNN && activeRouteData.initialLegs
-        ? activeRouteData.initialLegs
-        : (activeRouteData.legs || []);
-
-      const collected = [];
-      sourceLegs.forEach((leg, legIdx) => {
-        if (leg.coordinates) {
-          leg.coordinates.forEach((coord, idx) => {
-            if (legIdx > 0 && idx === 0) return; // avoid duplicate seam point
-            collected.push(coord);
-          });
-        }
-      });
-      rawCoords = collected;
     }
+    cands.sort((a, b) => b.score - a.score);
+    cands.forEach((c) => {
+      if (parks.length < 3 && parks.every((p) => Math.hypot(p.u - c.u, p.v - c.v) > 0.25)) parks.push(c);
+    });
+    const rand = seeded(Math.round(Math.abs(bounds.minLat * 1e4 + bounds.minLng * 1e3)));
+    const minor = [];
+    for (let i = 0; i < 9; i++) {
+      const t = -0.25 + i * 0.19 + rand() * 0.06;
+      const skew = (rand() - 0.5) * 0.12;
+      minor.push([-0.6, t - skew, 1.6, t + skew]);
+      const t2 = -0.25 + i * 0.19 + rand() * 0.06;
+      minor.push([t2 - skew, -0.6, t2 + skew, 1.6]);
+    }
+    return { parks, minor };
+  }, [nodes, roads, nodeMap, bounds]);
 
-    return rawCoords.map(([lat, lng]) => project(lat, lng));
-  }, [activeRouteData, activeAlgorithm, bounds]);
+  const selectedSet = useMemo(() => new Set(selectedStops), [selectedStops]);
 
-  const routePolylineString = useMemo(() => {
-    return routePolylinePoints.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
-  }, [routePolylinePoints]);
+  const visitNumber = useMemo(() => {
+    const map = new Map();
+    if (!hasRoute) return map;
+    let n = 1;
+    routeView.route.forEach((id) => {
+      if (id !== warehouseId && !map.has(id)) map.set(id, n++);
+    });
+    return map;
+  }, [routeView, hasRoute, warehouseId]);
 
-  // Compute simulated vehicle position along route polyline
-  const vehiclePosition = useMemo(() => {
-    if (routePolylinePoints.length < 2) return null;
-    const totalSegments = routePolylinePoints.length - 1;
-    const currentProgressIndex = simulationProgress * totalSegments;
-    const segmentIdx = Math.min(Math.floor(currentProgressIndex), totalSegments - 1);
-    const frac = currentProgressIndex - segmentIdx;
+  const points = useMemo(
+    () => (hasRoute ? routeView.coords.map(([lat, lng]) => project(lat, lng)) : []),
+    [routeView, hasRoute, project]
+  );
+  const polyline = points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
 
-    const pA = routePolylinePoints[segmentIdx];
-    const pB = routePolylinePoints[segmentIdx + 1];
+  // Direction chevrons every ~72px along the path, kept clear of the vertices.
+  const chevrons = useMemo(() => {
+    const out = [];
+    let carry = 36;
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1], b = points[i];
+      const len = Math.hypot(b.x - a.x, b.y - a.y);
+      const ang = (Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI;
+      let t = carry;
+      while (t < len) {
+        if (t > 20 && len - t > 20) out.push({ x: a.x + ((b.x - a.x) * t) / len, y: a.y + ((b.y - a.y) * t) / len, ang });
+        t += 72;
+      }
+      carry = t - len;
+    }
+    return out;
+  }, [points]);
 
-    if (!pA || !pB) return routePolylinePoints[0];
+  const vehicle = vehicleAt(points, simulationProgress);
 
-    const x = pA.x + (pB.x - pA.x) * frac;
-    const y = pA.y + (pB.y - pA.y) * frac;
-    const angle = Math.atan2(pB.y - pA.y, pB.x - pA.x) * (180 / Math.PI);
+  const handleKey = (e, id) => {
+    if (e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      onToggleStop(id);
+    }
+  };
 
-    return { x, y, angle };
-  }, [routePolylinePoints, simulationProgress]);
+  const zoomBy = (f) =>
+    setZoom((z) => {
+      const k = Math.min(4, Math.max(0.75, z.k * f));
+      const r = k / z.k;
+      return { k, x: z.x * r, y: z.y * r };
+    });
+
+  const onPointerDown = (e) => {
+    dragRef.current = { x: e.clientX, y: e.clientY, zx: zoom.x, zy: zoom.y };
+    e.currentTarget.setPointerCapture?.(e.pointerId);
+  };
+  const onPointerMove = (e) => {
+    const d = dragRef.current;
+    if (!d) return;
+    setZoom((z) => ({ ...z, x: d.zx + e.clientX - d.x, y: d.zy + e.clientY - d.y }));
+  };
+  const onPointerUp = () => {
+    dragRef.current = null;
+  };
+
+  // ---- layout of markers and labels (greedy, collision-aware) ----
+  const markerR = (n) =>
+    n.id === warehouseId ? 16 : selectedSet.has(n.id) ? 12 : n.type === 'customer' ? 6 : 4;
+  const screen = nodes.map((n) => ({ n, ...project(n.lat, n.lng), r: markerR(n) }));
+  const placed = screen.map(({ x, y, r }) => ({ x: x - r - 2, y: y - r - 2, w: 2 * r + 4, h: 2 * r + 4 }));
+  if (ins.left > 120) placed.push({ x: 0, y: 0, w: ins.left - 12, h: size.h });
+  const inView = (b) => b.x > 6 && b.y > 6 && b.x + b.w < size.w - 6 && b.y + b.h < size.h - 6;
+
+  const labels = [];
+  const placeLabel = ({ n, x, y, r }, preferBelow) => {
+    const isStop = selectedSet.has(n.id) || n.id === warehouseId;
+    const size_ = LABEL_SIZE;
+    const w = textWidth(n.name, size_) + (isStop ? 6 : 2);
+    const h = size_ + 4;
+    const right = { tx: x + r + 6, ty: y + size_ * 0.36, anchor: 'start', box: { x: x + r + 4, y: y - h / 2, w: w + 4, h } };
+    const left = { tx: x - r - 6, ty: y + size_ * 0.36, anchor: 'end', box: { x: x - r - 8 - w, y: y - h / 2, w: w + 4, h } };
+    const above = { tx: x, ty: y - r - 6, anchor: 'middle', box: { x: x - w / 2 - 2, y: y - r - 6 - size_, w: w + 4, h } };
+    const below = { tx: x, ty: y + r + size_ + 3, anchor: 'middle', box: { x: x - w / 2 - 2, y: y + r + 1, w: w + 4, h } };
+    const order = preferBelow ? [below, right, left, above] : [right, left, above, below];
+    const pick = order.find((c) => inView(c.box) && !hits(c.box, placed));
+    if (!pick && (!isStop || ins.left <= 120)) return;
+    const c = pick || order[0];
+    placed.push(c.box);
+    labels.push({ id: n.id, text: n.name, x: c.tx, y: c.ty, anchor: c.anchor, strong: isStop });
+  };
+  screen.filter((s) => s.n.id === warehouseId).forEach((s) => placeLabel(s, true));
+  screen.filter((s) => selectedSet.has(s.n.id)).forEach((s) => placeLabel(s, false));
+  screen.filter((s) => s.n.type === 'customer' && !selectedSet.has(s.n.id)).forEach((s) => placeLabel(s, false));
+
+  // Keep street names off the route line.
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1], b = points[i];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    for (let t = 0; t <= len; t += 6) {
+      const px = a.x + ((b.x - a.x) * t) / (len || 1), py = a.y + ((b.y - a.y) * t) / (len || 1);
+      placed.push({ x: px - 5, y: py - 5, w: 10, h: 10 });
+    }
+  }
+  const roadLabels = [];
+  roads.forEach((road, idx) => {
+    const u = nodeMap.get(road.source), v = nodeMap.get(road.target);
+    if (!u || !v || !road.street_name) return;
+    const p1 = project(u.lat, u.lng), p2 = project(v.lat, v.lng);
+    const len = Math.hypot(p2.x - p1.x, p2.y - p1.y);
+    const w = textWidth(road.street_name, ROAD_LABEL_SIZE);
+    if (len < w + 56) return;
+    let ang = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+    if (ang > Math.PI / 2) ang -= Math.PI;
+    if (ang < -Math.PI / 2) ang += Math.PI;
+    const h = ROAD_LABEL_SIZE + 2;
+    const ex = Math.abs(Math.cos(ang)) * (w / 2) + Math.abs(Math.sin(ang)) * (h / 2);
+    const ey = Math.abs(Math.sin(ang)) * (w / 2) + Math.abs(Math.cos(ang)) * (h / 2);
+    const mx = (p1.x + p2.x) / 2, my = (p1.y + p2.y) / 2;
+    for (const side of [1, -1]) {
+      const ox = -Math.sin(ang) * 11 * side, oy = Math.cos(ang) * 11 * side;
+      const box = { x: mx + ox - ex, y: my + oy - ey, w: ex * 2, h: ey * 2 };
+      if (inView(box) && !hits(box, placed)) {
+        placed.push(box);
+        roadLabels.push({ key: `rl-${idx}`, x: mx + ox, y: my + oy, deg: (ang * 180) / Math.PI, text: road.street_name });
+        return;
+      }
+    }
+  });
+
+  const line = LINE_STYLES[routeView?.view] || LINE_STYLES.optimized;
+  const halo = { stroke: '#ffffff', strokeWidth: 3.5, strokeLinejoin: 'round', paintOrder: 'stroke' };
+  const iconBtn =
+    'flex h-11 w-11 items-center justify-center text-[#374151] hover:bg-[#F3F4F6] hover:text-[#111827]';
+
+  const river = [projN(1.2, -0.7), projN(1.1, 0.3), projN(1.32, 0.9), projN(1.22, 1.8)];
 
   return (
-    <div className="relative w-full aspect-[4/3] max-h-[580px] bg-slate-900/90 rounded-2xl border border-slate-800 shadow-2xl overflow-hidden select-none">
-      {/* City Street Grid Background Texture */}
-      <div
-        className="absolute inset-0 pointer-events-none opacity-20"
-        style={{
-          backgroundImage: 'radial-gradient(rgba(148, 163, 184, 0.25) 1px, transparent 1px)',
-          backgroundSize: '24px 24px'
-        }}
-      />
-
+    <div ref={wrapRef} className="absolute inset-0">
       <svg
-        viewBox={`0 0 ${SVG_WIDTH} ${SVG_HEIGHT}`}
-        className="w-full h-full"
+        width={size.w}
+        height={size.h}
+        viewBox={`0 0 ${size.w} ${size.h}`}
+        className="block select-none"
+        role="group"
+        aria-label="City map"
       >
         <defs>
-          {/* Cyan Glow Filter for Active Route */}
-          <filter id="cyanGlow" x="-20%" y="-20%" width="140%" height="140%">
-            <feGaussianBlur stdDeviation="3" result="blur" />
-            <feComposite in="SourceGraphic" in2="blur" operator="over" />
+          <filter id="pin-shadow" x="-50%" y="-50%" width="200%" height="200%">
+            <feDropShadow dx="0" dy="1" stdDeviation="1.4" floodColor="#111827" floodOpacity="0.28" />
           </filter>
         </defs>
 
-        {/* 1. Light Neutral Road Network (Built directly from graph.roads) */}
-        <g className="road-network">
-          {roads.map((road, idx) => {
-            const u = nodeMap.get(road.source);
-            const v = nodeMap.get(road.target);
-            if (!u || !v) return null;
+        <rect
+          width={size.w}
+          height={size.h}
+          fill="#F3F1EC"
+          className="cursor-grab active:cursor-grabbing"
+          onPointerDown={onPointerDown}
+          onPointerMove={onPointerMove}
+          onPointerUp={onPointerUp}
+          onPointerCancel={onPointerUp}
+        />
 
-            const p1 = project(u.lat, u.lng);
-            const p2 = project(v.lat, v.lng);
-
+        <g className="pointer-events-none">
+          {decor.minor.map(([a, b, c, d], i) => {
+            const p = projN(a, b), q = projN(c, d);
+            return <line key={`m-${i}`} x1={p.x} y1={p.y} x2={q.x} y2={q.y} stroke="#FBFAF7" strokeWidth={3} />;
+          })}
+          <path
+            d={`M${river[0].x},${river[0].y} C${river[1].x},${river[1].y} ${river[2].x},${river[2].y} ${river[3].x},${river[3].y}`}
+            fill="none"
+            stroke="#D8E3EA"
+            strokeWidth={46 * zoom.k}
+            strokeLinecap="round"
+          />
+          {decor.parks.map((pk, i) => {
+            const a = projN(pk.u - 0.075, pk.v + 0.055), b = projN(pk.u + 0.075, pk.v - 0.055);
             return (
-              <g key={`road-${road.source}-${road.target}-${idx}`}>
-                {/* Outer light neutral road casing */}
-                <line
-                  x1={p1.x}
-                  y1={p1.y}
-                  x2={p2.x}
-                  y2={p2.y}
-                  stroke="#334155"
-                  strokeWidth="5"
+              <rect key={`p-${i}`} x={a.x} y={a.y} width={b.x - a.x} height={b.y - a.y} rx={10} fill="#E2EBD9" />
+            );
+          })}
+        </g>
+
+        <g className="pointer-events-none">
+          {roads.map((road, idx) => {
+            const u = nodeMap.get(road.source), v = nodeMap.get(road.target);
+            if (!u || !v) return null;
+            const p1 = project(u.lat, u.lng), p2 = project(v.lat, v.lng);
+            const major = road.distance_km >= 0.85;
+            return (
+              <line key={`rc-${idx}`} x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} stroke="#D6D2C8" strokeWidth={major ? 11 : 8} strokeLinecap="round" />
+            );
+          })}
+          {roads.map((road, idx) => {
+            const u = nodeMap.get(road.source), v = nodeMap.get(road.target);
+            if (!u || !v) return null;
+            const p1 = project(u.lat, u.lng), p2 = project(v.lat, v.lng);
+            const major = road.distance_km >= 0.85;
+            return (
+              <line key={`rf-${idx}`} x1={p1.x} y1={p1.y} x2={p2.x} y2={p2.y} stroke="#FFFFFF" strokeWidth={major ? 8 : 5} strokeLinecap="round" />
+            );
+          })}
+          {roadLabels.map((l) => (
+            <text
+              key={l.key}
+              x={l.x}
+              y={l.y}
+              transform={`rotate(${l.deg.toFixed(1)} ${l.x.toFixed(1)} ${l.y.toFixed(1)})`}
+              textAnchor="middle"
+              dominantBaseline="middle"
+              fontSize={ROAD_LABEL_SIZE}
+              fill="#8A867D"
+              {...halo}
+              stroke="#F3F1EC"
+            >
+              {l.text}
+            </text>
+          ))}
+        </g>
+
+        {polyline && (
+          <g className="route">
+            {line.casing && (
+              <polyline points={polyline} fill="none" stroke={line.casing} strokeWidth={line.width + 3} strokeLinecap="round" strokeLinejoin="round" />
+            )}
+            <polyline
+              points={polyline}
+              fill="none"
+              stroke={line.color}
+              strokeWidth={line.width}
+              strokeDasharray={line.dash || undefined}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              data-role="route"
+            />
+            <polyline points={polyline} fill="none" stroke="transparent" strokeWidth={18} />
+            <polyline
+              className="route-flow pointer-events-none"
+              points={polyline}
+              fill="none"
+              stroke="#ffffff"
+              strokeOpacity="0.55"
+              strokeWidth={2}
+              strokeDasharray="4 12"
+              strokeLinecap="round"
+            />
+            <g className="pointer-events-none">
+              {chevrons.map((c, i) => (
+                <path
+                  key={`cv-${i}`}
+                  d="M-2.5,-3.5 L1.5,0 L-2.5,3.5"
+                  transform={`translate(${c.x.toFixed(1)} ${c.y.toFixed(1)}) rotate(${c.ang.toFixed(1)})`}
+                  fill="none"
+                  stroke={line.dash ? '#6B7280' : '#ffffff'}
+                  strokeWidth={1.8}
                   strokeLinecap="round"
+                  strokeLinejoin="round"
                 />
-                {/* Inner neutral road line */}
-                <line
-                  x1={p1.x}
-                  y1={p1.y}
-                  x2={p2.x}
-                  y2={p2.y}
-                  stroke="#64748b"
-                  strokeWidth="2.5"
-                  strokeLinecap="round"
-                />
-                {/* Distance label on road midpoint */}
-                {road.distance_km && (
-                  <text
-                    x={(p1.x + p2.x) / 2}
-                    y={(p1.y + p2.y) / 2 - 4}
-                    fill="#94a3b8"
-                    fontSize="9"
-                    fontWeight="500"
-                    textAnchor="middle"
-                    className="pointer-events-none select-none bg-slate-900/80"
-                  >
-                    {road.distance_km}km
+              ))}
+            </g>
+          </g>
+        )}
+
+        {screen.map(({ n: node, x, y, r }) => {
+          const isHighlighted = selectedNodeId === node.id;
+          const isHovered = hoveredNodeId === node.id;
+          if (node.id === warehouseId) {
+            return (
+              <g key={node.id} transform={`translate(${x}, ${y})`} data-role="depot" className="pointer-events-none">
+                <rect x="-20" y="-20" width="40" height="40" rx="11" fill="none" stroke={ACCENT} strokeWidth="2" opacity={isHighlighted || isHovered ? 1 : 0} />
+                <g filter="url(#pin-shadow)">
+                  <rect x="-14" y="-14" width="28" height="28" rx="7" fill="#111827" stroke="#ffffff" strokeWidth="2.5" />
+                </g>
+                <path d="M-6.5,0 L0,-5.5 L6.5,0 V6 H-6.5 Z" fill="none" stroke="#ffffff" strokeWidth="1.6" strokeLinejoin="round" />
+                <path d="M-2,6 V2 H2 V6" fill="none" stroke="#ffffff" strokeWidth="1.6" />
+              </g>
+            );
+          }
+          const isStop = selectedSet.has(node.id);
+          const order = visitNumber.get(node.id);
+          return (
+            <g
+              key={node.id}
+              transform={`translate(${x}, ${y})`}
+              className={`map-node ${isHovered ? 'is-hovered' : ''} ${togglingDisabled ? 'cursor-not-allowed' : 'cursor-pointer'}`}
+              data-role={isStop ? 'stop' : 'station'}
+              role="button"
+              tabIndex={0}
+              aria-pressed={isStop}
+              aria-disabled={togglingDisabled || undefined}
+              aria-label={`Toggle stop ${node.id} – ${node.name}`}
+              onClick={() => onToggleStop(node.id)}
+              onKeyDown={(e) => handleKey(e, node.id)}
+            >
+              <circle r="22" fill="transparent" />
+              <circle className="hover-ring" r={r + 6} fill={ACCENT} fillOpacity="0.12" opacity={isHovered && !isHighlighted ? 1 : 0} />
+              <circle className="focus-ring" r={r + 6} fill={ACCENT} fillOpacity="0.1" stroke={ACCENT} strokeWidth="2" opacity={isHighlighted ? 1 : 0} />
+              <g className="pin">
+                {isStop ? (
+                  <g filter="url(#pin-shadow)">
+                    <circle r={r} fill={ACCENT} stroke="#ffffff" strokeWidth="2.5" />
+                  </g>
+                ) : (
+                  <circle r={r} fill="#ffffff" stroke={node.type === 'customer' ? '#9CA3AF' : '#B9B5AC'} strokeWidth="1.5" />
+                )}
+                {isStop && order === undefined && <circle r="3.2" fill="#ffffff" />}
+                {isStop && order !== undefined && (
+                  <text y="4" textAnchor="middle" fontSize="11.5" fontWeight="650" fill="#ffffff" data-role="order" className="tnum">
+                    {order}
                   </text>
                 )}
               </g>
-            );
-          })}
+            </g>
+          );
+        })}
+
+        <g className="pointer-events-none">
+          {labels.map((l) => (
+            <text
+              key={`lb-${l.id}`}
+              x={l.x}
+              y={l.y}
+              textAnchor={l.anchor}
+              fontSize={LABEL_SIZE}
+              fontWeight={l.strong ? 600 : 400}
+              fill={l.strong ? '#111827' : '#6B7280'}
+              {...halo}
+            >
+              {l.text}
+            </text>
+          ))}
         </g>
 
-        {/* 2. Cyan Delivery Vehicle / Route Polyline (Following actual C++ graph edges) */}
-        {routePolylineString && (
-          <g className="cyan-delivery-route">
-            {/* Cyan background glow */}
-            <polyline
-              points={routePolylineString}
-              fill="none"
-              stroke="#06b6d4"
-              strokeWidth="7"
-              strokeOpacity="0.25"
-              filter="url(#cyanGlow)"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
-            {/* Primary cyan delivery path */}
-            <polyline
-              points={routePolylineString}
-              fill="none"
-              stroke="#06b6d4"
-              strokeWidth="3.5"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-            />
+        {vehicle && (isPlaying || simulationProgress > 0) && (
+          <g transform={`translate(${vehicle.x}, ${vehicle.y})`} className="pointer-events-none" data-role="vehicle">
+            <circle className={isPlaying ? 'vehicle-halo' : ''} r="16" fill={ACCENT} opacity={isPlaying ? undefined : 0.16} />
+            <g filter="url(#pin-shadow)">
+              <circle r="7.5" fill="#ffffff" />
+            </g>
+            <circle r="5" fill={ACCENT} />
           </g>
         )}
-
-        {/* 3. Animated Cyan Delivery Vehicle Marker */}
-        {vehiclePosition && (
-          <g
-            transform={`translate(${vehiclePosition.x}, ${vehiclePosition.y}) rotate(${vehiclePosition.angle})`}
-            className="transition-transform duration-75"
-          >
-            {/* Radar ping */}
-            <circle r="12" fill="#06b6d4" opacity="0.3" className="animate-ping" />
-            {/* Vehicle body */}
-            <circle r="8" fill="#0e7490" stroke="#06b6d4" strokeWidth="2" />
-            {/* Directional arrow */}
-            <polygon points="5,0 -3,-4 -1,0 -3,4" fill="#ffffff" />
-          </g>
-        )}
-
-        {/* 4. Intersections and Junction Nodes */}
-        <g className="intersection-markers">
-          {nodes.map((node) => {
-            if (node.id === warehouseId || stopVisitNumberMap.has(node.id)) return null;
-            const pt = project(node.lat, node.lng);
-            return (
-              <g
-                key={`junction-${node.id}`}
-                transform={`translate(${pt.x}, ${pt.y})`}
-                className="cursor-pointer group"
-                onClick={() => onSelectNode && onSelectNode(node.id)}
-              >
-                <circle
-                  r="4"
-                  fill="#475569"
-                  stroke="#1e293b"
-                  strokeWidth="1.5"
-                  className="transition-all group-hover:scale-125 group-hover:fill-cyan-400"
-                />
-                <text
-                  x="0"
-                  y="-8"
-                  fill="#94a3b8"
-                  fontSize="9"
-                  textAnchor="middle"
-                  className="opacity-0 group-hover:opacity-100 transition-opacity font-mono pointer-events-none"
-                >
-                  {node.id}
-                </text>
-              </g>
-            );
-          })}
-        </g>
-
-        {/* 5. Warehouse / Start Marker */}
-        {nodes
-          .filter((n) => n.id === warehouseId)
-          .map((wh) => {
-            const pt = project(wh.lat, wh.lng);
-            return (
-              <g
-                key={`warehouse-${wh.id}`}
-                transform={`translate(${pt.x}, ${pt.y})`}
-                className="cursor-pointer group z-20"
-                onClick={() => onSelectNode && onSelectNode(wh.id)}
-              >
-                {/* Pulsing halo */}
-                <circle r="16" fill="#f59e0b" opacity="0.25" className="animate-pulse" />
-                {/* Warehouse Badge */}
-                <rect
-                  x="-12"
-                  y="-12"
-                  width="24"
-                  height="24"
-                  rx="6"
-                  fill="#1e293b"
-                  stroke="#f59e0b"
-                  strokeWidth="2.5"
-                  className="transition-transform group-hover:scale-110"
-                />
-                {/* Warehouse roof icon */}
-                <path d="M -6 -3 L 0 -8 L 6 -3 L 6 6 L -6 6 Z" fill="#f59e0b" />
-                <text
-                  x="0"
-                  y="22"
-                  textAnchor="middle"
-                  fill="#fbbf24"
-                  fontSize="10"
-                  fontWeight="bold"
-                  className="pointer-events-none drop-shadow"
-                >
-                  DEPOT
-                </text>
-              </g>
-            );
-          })}
-
-        {/* 6. Numbered Red Customer Markers */}
-        <g className="customer-stop-markers">
-          {nodes
-            .filter((n) => stopVisitNumberMap.has(n.id))
-            .map((stop) => {
-              const pt = project(stop.lat, stop.lng);
-              const visitNum = stopVisitNumberMap.get(stop.id);
-              const isSelected = selectedNodeId === stop.id;
-
-              return (
-                <g
-                  key={`stop-${stop.id}`}
-                  transform={`translate(${pt.x}, ${pt.y})`}
-                  className="cursor-pointer group z-30"
-                  onClick={() => onSelectNode && onSelectNode(stop.id)}
-                >
-                  {/* Outer glow */}
-                  <circle
-                    r={isSelected ? 16 : 13}
-                    fill="#ef4444"
-                    opacity="0.3"
-                    className="transition-all"
-                  />
-                  {/* Numbered Red Marker Pin */}
-                  <circle
-                    r="10"
-                    fill="#ef4444"
-                    stroke="#ffffff"
-                    strokeWidth="2"
-                    className="transition-transform group-hover:scale-110 drop-shadow"
-                  />
-                  {/* Stop Visit Sequence Number */}
-                  <text
-                    x="0"
-                    y="3.5"
-                    textAnchor="middle"
-                    fill="#ffffff"
-                    fontSize="10"
-                    fontWeight="800"
-                    className="pointer-events-none select-none font-sans"
-                  >
-                    {visitNum}
-                  </text>
-                  {/* Stop ID label */}
-                  <text
-                    x="0"
-                    y="-14"
-                    textAnchor="middle"
-                    fill="#fecaca"
-                    fontSize="9"
-                    fontWeight="600"
-                    className="pointer-events-none opacity-90 group-hover:opacity-100 drop-shadow"
-                  >
-                    {stop.name || stop.id}
-                  </text>
-                </g>
-              );
-            })}
-        </g>
       </svg>
 
-      {/* Map Legend */}
-      <div className="absolute bottom-2.5 left-2.5 max-w-[calc(100%-1.25rem)] flex flex-wrap items-center gap-2 sm:gap-3 px-2.5 sm:px-3 py-1.5 rounded-xl bg-slate-900/90 backdrop-blur border border-slate-800 text-[10px] sm:text-[11px] shadow-lg pointer-events-none">
-        <div className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded bg-amber-500" />
-          <span className="text-slate-300 font-medium">Warehouse (Start/End)</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <span className="w-2.5 h-2.5 rounded-full bg-rose-500 text-white font-bold flex items-center justify-center text-[7px]">
-            1
-          </span>
-          <span className="text-slate-300 font-medium">Numbered Customer Stop</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <span className="w-4 h-1 rounded bg-cyan-400" />
-          <span className="text-cyan-400 font-medium">Cyan Delivery Route</span>
-        </div>
-        <div className="flex items-center gap-1.5">
-          <span className="w-3 h-0.5 bg-slate-500" />
-          <span className="text-slate-400">Road Network (Graph Edges)</span>
-        </div>
+      <div className="float-card absolute right-4 top-4 flex flex-col overflow-hidden rounded-xl">
+        <button type="button" className={iconBtn} onClick={() => zoomBy(1.3)} aria-label="Zoom in">
+          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
+        </button>
+        <div className="h-px bg-[#EEF0F3]" />
+        <button type="button" className={iconBtn} onClick={() => zoomBy(1 / 1.3)} aria-label="Zoom out">
+          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8h10" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
+        </button>
+        <div className="h-px bg-[#EEF0F3]" />
+        <button type="button" className={iconBtn} onClick={() => setZoom({ k: 1, x: 0, y: 0 })} aria-label="Fit map to stops">
+          <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+            <path d="M2.5 6V2.5H6M10 2.5h3.5V6M13.5 10v3.5H10M6 13.5H2.5V10" />
+          </svg>
+        </button>
       </div>
     </div>
   );

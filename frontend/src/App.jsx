@@ -1,63 +1,102 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
-import Header from './components/Header';
+import { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import CityMap from './components/CityMap';
 import MetricCards from './components/MetricCards';
 import RouteControls from './components/RouteControls';
 import StopItinerary from './components/StopItinerary';
+import Scrubber from './components/Scrubber';
+import Legend from './components/Legend';
 import { SAMPLE_PRESETS } from './data/sampleCityGraph';
 import { checkBackendHealth, optimizeRoute } from './services/optimizerApi';
+import { pickRouteView, resolveView } from './utils/routeView';
+
+const PLAYBACK_SPEED = 0.15; // full tour in about 6.5 s
+
+function defaultStopsFor(preset) {
+  return preset.availableCustomerStops.slice(0, preset.defaultStopCount);
+}
 
 export default function App() {
-  // Preset and graph selection state
   const [selectedPresetId, setSelectedPresetId] = useState(SAMPLE_PRESETS[0].id);
-  const activePreset = useMemo(() => {
-    return SAMPLE_PRESETS.find((p) => p.id === selectedPresetId) || SAMPLE_PRESETS[0];
-  }, [selectedPresetId]);
+  const activePreset = useMemo(
+    () => SAMPLE_PRESETS.find((p) => p.id === selectedPresetId) || SAMPLE_PRESETS[0],
+    [selectedPresetId]
+  );
 
-  const [selectedStopCount, setSelectedStopCount] = useState(activePreset.defaultStopCount);
+  const [selectedStops, setSelectedStops] = useState(() => defaultStopsFor(SAMPLE_PRESETS[0]));
+  const [backendHealth, setBackendHealth] = useState({ online: false, executableExists: false, checked: false });
+  const [routeData, setRouteData] = useState(null);
+  const [activeView, setActiveView] = useState('optimized');
+  const [isLoading, setIsLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState(null);
+  const [selectedNodeId, setSelectedNodeId] = useState(null);
+  const [simulationProgress, setSimulationProgress] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [hoveredNodeId, setHoveredNodeId] = useState(null);
+  const animationRef = useRef(null);
+  const [isLg, setIsLg] = useState(() => window.matchMedia('(min-width: 1024px)').matches);
 
-  // Synchronize stop count when switching presets
-  const handlePresetChange = (newPresetId) => {
-    setSelectedPresetId(newPresetId);
-    const targetPreset = SAMPLE_PRESETS.find((p) => p.id === newPresetId) || SAMPLE_PRESETS[0];
-    setSelectedStopCount(targetPreset.defaultStopCount);
-    setRouteData(null);
-    setErrorMessage(null);
-    setSimulationProgress(0);
-    setIsPlaying(false);
-  };
+  useEffect(() => {
+    const mq = window.matchMedia('(min-width: 1024px)');
+    const onChange = (e) => setIsLg(e.matches);
+    mq.addEventListener('change', onChange);
+    return () => mq.removeEventListener('change', onChange);
+  }, []);
 
-  // Derive active customer stops according to stop count selector
-  const activeStops = useMemo(() => {
-    return activePreset.availableCustomerStops.slice(0, selectedStopCount);
-  }, [activePreset, selectedStopCount]);
+  // Map area that stays clear of the floating panel / bottom sheet.
+  const insets = useMemo(
+    () =>
+      isLg
+        ? { left: 452, top: 72, right: 190, bottom: 120 }
+        : { left: 24, top: 28, right: 76, bottom: Math.round(window.innerHeight * 0.5) + 84 },
+    [isLg]
+  );
 
-  // Node Map for fast node info lookups
   const nodeMap = useMemo(() => {
     const map = new Map();
     activePreset.nodes.forEach((n) => map.set(n.id, n));
     return map;
   }, [activePreset]);
 
-  // System state
-  const [backendHealth, setBackendHealth] = useState({ online: false, executableExists: false });
-  const [routeData, setRouteData] = useState(null);
-  const [activeAlgorithm, setActiveAlgorithm] = useState('two_opt');
-  const [isLoading, setIsLoading] = useState(false);
-  const [errorMessage, setErrorMessage] = useState(null);
-  const [selectedNodeId, setSelectedNodeId] = useState(null);
+  // Any change to the inputs invalidates the current route.
+  const clearResult = useCallback(() => {
+    setRouteData(null);
+    setErrorMessage(null);
+    setSimulationProgress(0);
+    setIsPlaying(false);
+    setHoveredNodeId(null);
+  }, []);
 
-  // Simulation playback state
-  const [simulationProgress, setSimulationProgress] = useState(0);
-  const [isPlaying, setIsPlaying] = useState(false);
-  const animationRef = useRef(null);
+  const applyStops = useCallback(
+    (nextStops) => {
+      setSelectedStops(nextStops);
+      clearResult();
+    },
+    [clearResult]
+  );
 
-  // 1. Initial health probe on mount
+  const handlePresetChange = (newPresetId) => {
+    const preset = SAMPLE_PRESETS.find((p) => p.id === newPresetId) || SAMPLE_PRESETS[0];
+    setSelectedPresetId(preset.id);
+    setSelectedNodeId(null);
+    applyStops(defaultStopsFor(preset));
+  };
+
+  const handleToggleStop = (nodeId) => {
+    if (isLoading || nodeId === activePreset.warehouse) return;
+    const isOn = selectedStops.includes(nodeId);
+    const order = activePreset.nodes.map((n) => n.id);
+    const next = isOn
+      ? selectedStops.filter((id) => id !== nodeId)
+      : [...selectedStops, nodeId].sort((a, b) => order.indexOf(a) - order.indexOf(b));
+    applyStops(next);
+  };
+
+  // Health probe
   useEffect(() => {
     let isMounted = true;
     const probe = async () => {
       const health = await checkBackendHealth();
-      if (isMounted) setBackendHealth(health);
+      if (isMounted) setBackendHealth({ ...health, checked: true });
     };
     probe();
     const interval = setInterval(probe, 10000);
@@ -67,190 +106,144 @@ export default function App() {
     };
   }, []);
 
-  // 2. Playback animation loop
+  // Playback is derived: reaching the end stops the loop without an extra state update.
+  const playing = isPlaying && simulationProgress < 1;
+
+  // Playback loop: the updater only clamps progress, no side effects.
   useEffect(() => {
-    if (!isPlaying) {
-      if (animationRef.current) cancelAnimationFrame(animationRef.current);
-      return;
-    }
-
+    if (!playing) return undefined;
     let lastTime = performance.now();
-    const loop = (currentTime) => {
-      const dt = (currentTime - lastTime) / 1000;
-      lastTime = currentTime;
-
-      setSimulationProgress((prev) => {
-        const next = prev + dt * 0.15; // Complete tour in ~6.5 seconds
-        if (next >= 1.0) {
-          setIsPlaying(false);
-          return 1.0;
-        }
-        return next;
-      });
-
+    const loop = (now) => {
+      const dt = (now - lastTime) / 1000;
+      lastTime = now;
+      setSimulationProgress((prev) => Math.min(1, prev + dt * PLAYBACK_SPEED));
       animationRef.current = requestAnimationFrame(loop);
     };
-
     animationRef.current = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(animationRef.current);
+  }, [playing]);
 
-    return () => {
-      if (animationRef.current) cancelAnimationFrame(animationRef.current);
-    };
-  }, [isPlaying]);
+  const handleTogglePlay = () => {
+    if (playing) {
+      setIsPlaying(false);
+      return;
+    }
+    if (simulationProgress >= 1) setSimulationProgress(0);
+    setIsPlaying(true);
+  };
 
-  // 3. Execution handler invoking Express API -> C++ binary
-  const handleExecuteOptimization = async (targetAlgorithm) => {
-    if (isLoading) return; // Prevent repeated clicks while in-flight
+  const handleOptimize = async () => {
+    if (isLoading || selectedStops.length === 0) return;
     setIsLoading(true);
     setErrorMessage(null);
     setIsPlaying(false);
     setSimulationProgress(0);
-
-    const payload = {
-      warehouse: activePreset.warehouse,
-      stops: activeStops,
-      nodes: activePreset.nodes,
-      roads: activePreset.roads
-    };
-
     try {
-      const result = await optimizeRoute(payload);
+      const result = await optimizeRoute({
+        warehouse: activePreset.warehouse,
+        stops: selectedStops,
+        nodes: activePreset.nodes.map(({ id, name, lat, lng }) => ({ id, name, lat, lng })),
+        roads: activePreset.roads
+      });
       setRouteData(result);
-      setActiveAlgorithm(targetAlgorithm);
-      setSimulationProgress(0);
+      setActiveView('optimized');
     } catch (err) {
-      console.error('[App] Optimization request failed:', err);
-      setErrorMessage(err.message || 'An unexpected error occurred during optimization');
+      setRouteData(null);
+      setErrorMessage(err.message || 'Something went wrong while optimizing.');
     } finally {
       setIsLoading(false);
     }
   };
 
+  const view = resolveView(routeData, activeView);
+  const routeView = useMemo(() => pickRouteView(routeData, view), [routeData, view]);
+
+  const hasRoute = Boolean(routeData);
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans antialiased selection:bg-cyan-500 selection:text-slate-950">
-      {/* Header */}
-      <Header backendHealth={backendHealth} />
+    <div className="app-shell relative h-screen w-full overflow-hidden">
+      <CityMap
+        key={selectedPresetId}
+        graph={activePreset}
+        selectedStops={selectedStops}
+        routeView={routeView}
+        hasRoute={hasRoute}
+        simulationProgress={simulationProgress}
+        isPlaying={playing}
+        selectedNodeId={selectedNodeId}
+        hoveredNodeId={hoveredNodeId}
+        onToggleStop={handleToggleStop}
+        togglingDisabled={isLoading}
+        insets={insets}
+      />
 
-      {/* Main Container */}
-      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-5">
-        {/* Error Notification Alert */}
-        {errorMessage && (
-          <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 flex items-start justify-between gap-3 text-xs shadow-lg animate-fadeIn">
-            <div className="flex items-center gap-2">
-              <span className="w-2 h-2 rounded-full bg-rose-400 shrink-0" />
-              <span>{errorMessage}</span>
+      <aside
+        aria-label="Route planner"
+        className="float-card absolute inset-x-0 bottom-0 z-10 flex h-[50vh] flex-col overflow-hidden rounded-t-2xl lg:inset-x-auto lg:bottom-auto lg:left-4 lg:top-4 lg:h-auto lg:max-h-[calc(100vh-32px)] lg:w-[404px] lg:rounded-xl"
+      >
+        <div className="mx-auto mt-2 h-1 w-9 shrink-0 rounded-full bg-[#E5E7EB] lg:hidden" aria-hidden="true" />
+        <div className="min-h-0 flex-1 overflow-y-auto">
+          <RouteControls
+            presets={SAMPLE_PRESETS}
+            selectedPresetId={selectedPresetId}
+            onChangePreset={handlePresetChange}
+            selectedStopCount={selectedStops.length}
+            onResetStops={() => applyStops(defaultStopsFor(activePreset))}
+            onClearStops={() => applyStops([])}
+            isLoading={isLoading}
+            onOptimize={handleOptimize}
+            backendHealth={backendHealth}
+          />
+
+          {errorMessage && (
+            <div role="alert" className="mx-6 mb-4 flex items-start gap-3 rounded-lg border border-[#FECDCA] bg-[#FEF3F2] py-2 pl-3 pr-1 text-[13px] text-[#912018]">
+              <svg className="mt-[3px] shrink-0" width="14" height="14" viewBox="0 0 14 14" aria-hidden="true">
+                <circle cx="7" cy="7" r="6.25" fill="none" stroke="currentColor" strokeWidth="1.5" />
+                <path d="M7 3.8v3.6M7 9.6v.1" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+              </svg>
+              <span className="flex-1 py-0.5">
+                <span className="font-semibold">Could not optimize.</span> {errorMessage}
+              </span>
+              <button type="button" onClick={() => setErrorMessage(null)} aria-label="Dismiss error" className="-my-1.5 flex h-11 w-11 shrink-0 items-center justify-center rounded-md hover:bg-[#FEE4E2]">
+                <svg width="12" height="12" viewBox="0 0 12 12" aria-hidden="true"><path d="M2.5 2.5l7 7M9.5 2.5l-7 7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
+              </button>
             </div>
-            <button
-              onClick={() => setErrorMessage(null)}
-              className="text-rose-400 hover:text-rose-200 font-bold ml-2"
-            >
-              ✕
-            </button>
+          )}
+
+          <div className="border-t border-[#F0F1F3]">
+            <MetricCards routeData={routeData} isLoading={isLoading} activeView={view} onChangeView={setActiveView} />
           </div>
-        )}
-
-        {/* Backend Offline Warning Banner */}
-        {!backendHealth.online && (
-          <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center justify-between gap-2 shadow-sm">
-            <span>
-              <strong>Backend Offline:</strong> Start the Express API server with{' '}
-              <code className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-amber-200">
-                cd backend && npm start
-              </code>{' '}
-              to run C++ optimization requests.
-            </span>
-          </div>
-        )}
-
-        {/* Metric Cards Row */}
-        <MetricCards
-          initialDistance={routeData?.initialDistance}
-          optimizedDistance={routeData?.optimizedDistance}
-          distanceSaved={routeData?.distanceSaved}
-          improvementPercent={routeData?.improvementPercent}
-          executionTimeMs={routeData?.executionTimeMs}
-          hasResult={Boolean(routeData)}
-        />
-
-        {/* Dashboard Grid: Map on Left, Itinerary & Info on Right */}
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-          {/* Left Column: Simulated SVG City Map & Controls (8 cols) */}
-          <div className="lg:col-span-8 space-y-5">
-            <CityMap
-              graph={activePreset}
-              activeRouteData={routeData}
-              activeAlgorithm={activeAlgorithm}
-              simulationProgress={simulationProgress}
-              selectedNodeId={selectedNodeId}
-              onSelectNode={setSelectedNodeId}
-            />
-
-            <RouteControls
-              presets={SAMPLE_PRESETS}
-              selectedPresetId={selectedPresetId}
-              onChangePreset={handlePresetChange}
-              availableCustomerStops={activePreset.availableCustomerStops}
-              selectedStopCount={selectedStopCount}
-              onChangeStopCount={setSelectedStopCount}
-              activeAlgorithm={activeAlgorithm}
-              onChangeActiveAlgorithm={setActiveAlgorithm}
-              isLoading={isLoading}
-              onRunNearestNeighbor={() => handleExecuteOptimization('nearest_neighbor')}
-              onRunTwoOpt={() => handleExecuteOptimization('two_opt')}
-              hasResult={Boolean(routeData)}
-              isPlaying={isPlaying}
-              onTogglePlay={() => setIsPlaying((p) => !p)}
-              simulationProgress={simulationProgress}
-              onChangeProgress={(p) => {
-                setIsPlaying(false);
-                setSimulationProgress(p);
-              }}
-            />
-          </div>
-
-          {/* Right Column: Dispatch Itinerary & Graph Specs (4 cols) */}
-          <div className="lg:col-span-4 space-y-5">
-            <StopItinerary
-              routeData={routeData}
-              activeAlgorithm={activeAlgorithm}
-              nodeMap={nodeMap}
-              warehouseId={activePreset.warehouse}
-              selectedNodeId={selectedNodeId}
-              onSelectNode={setSelectedNodeId}
-            />
-
-            {/* Active Graph Specifications Card */}
-            <div className="p-4 rounded-2xl bg-slate-900/80 border border-slate-800 text-xs space-y-2.5">
-              <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-                <span className="font-bold text-white uppercase tracking-wider text-[11px]">
-                  Graph Network Topology
-                </span>
-                <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono text-[10px]">
-                  Sample Data
-                </span>
-              </div>
-              <p className="text-slate-400 text-[11px] leading-relaxed">
-                {activePreset.description}
-              </p>
-              <div className="grid grid-cols-2 gap-2 pt-1 font-mono text-[11px]">
-                <div className="p-2 rounded-lg bg-slate-800/60 border border-slate-750">
-                  <div className="text-slate-400 text-[10px] uppercase font-sans">Total Nodes</div>
-                  <div className="text-white font-bold mt-0.5">{activePreset.nodes.length}</div>
-                </div>
-                <div className="p-2 rounded-lg bg-slate-800/60 border border-slate-750">
-                  <div className="text-slate-400 text-[10px] uppercase font-sans">Road Edges</div>
-                  <div className="text-white font-bold mt-0.5">{activePreset.roads.length}</div>
-                </div>
-              </div>
-            </div>
-          </div>
+          <StopItinerary
+            routeView={routeView}
+            hasRoute={hasRoute && !isLoading}
+            nodeMap={nodeMap}
+            warehouseId={activePreset.warehouse}
+            selectedNodeId={selectedNodeId}
+            onSelectNode={setSelectedNodeId}
+            onHoverNode={setHoveredNodeId}
+          />
+          <p className="border-t border-[#F0F1F3] px-6 py-4 text-[12px] leading-relaxed text-[#9CA3AF]">{activePreset.description}</p>
         </div>
-      </main>
+      </aside>
 
-      {/* Footer */}
-      <footer className="border-t border-slate-800 px-6 py-3 text-center text-xs text-slate-500">
-        Smart Delivery Route Optimization • College Algorithms Mini-Project • C++17 Core / Express API / Native SVG Map
-      </footer>
+      <Legend className="absolute bottom-4 left-[436px] hidden lg:block" />
+
+      {hasRoute && (
+        <div className="pointer-events-none absolute inset-x-3 bottom-[calc(50vh+12px)] flex justify-center lg:bottom-4 lg:left-[436px] lg:right-4 lg:justify-end xl:justify-center">
+          <Scrubber
+            className="pointer-events-auto"
+            isPlaying={playing}
+            onTogglePlay={handleTogglePlay}
+            simulationProgress={simulationProgress}
+            totalKm={routeView.distance}
+            durationS={1 / PLAYBACK_SPEED}
+            onChangeProgress={(p) => {
+              setIsPlaying(false);
+              setSimulationProgress(p);
+            }}
+          />
+        </div>
+      )}
     </div>
   );
 }

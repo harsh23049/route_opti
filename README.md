@@ -27,7 +27,8 @@ Formally, this is the **Metric Traveling Salesperson Problem (TSP)** over the sh
 ## 2. Key Features
 
 - **Pure algorithmic core:** no external map APIs. Every road and route geometry comes from the input graph.
-- **Native SVG city map:** roads drawn from the graph edges, depot and numbered stop markers, route polylines and an animated vehicle.
+- **Native SVG city map:** full-screen map with pan and zoom, roads and street names drawn from the graph edges, depot and numbered stop markers, direction arrows and an animated vehicle. Click (or Enter/Space on) any location to add or remove it as a stop.
+- **Responsive and accessible UI:** floating planner panel on desktop and a bottom sheet on phones; keyboard-operable map nodes and controls; reduced-motion support.
 - **Three-way route comparison:** Nearest Neighbor vs optimized (2-Opt + Or-opt) vs exact optimum (Held-Karp).
 - **Live metrics:** initial and optimized distance, distance saved, improvement %, optimality gap and engine latency.
 - **Safe process boundary:** Express runs the compiled C++ engine with `child_process.spawn` (no shell), passing JSON over stdin/stdout, with a bounded job pool, wait queue and timeout.
@@ -277,9 +278,9 @@ CI also runs the C++ tests under ASan + UBSan and smoke-tests the Docker image. 
 
 ## 13. Instructions for Report Screenshots
 
-1. **Dashboard overview:** open `http://localhost:3000`, pick **"Downtown Metro Grid"** with the default stops (S1–S4). Capture the header (status "API Connected • C++ Ready"), metric cards, map, controls and itinerary.
-2. **Optimization result:** click **"Optimize Route"**. Capture the route on the map and the metric cards: 0.35 km saved, 6.4% improvement, 0% optimality gap.
-3. **Algorithm comparison:** switch the route view between **Nearest Neighbor**, **Optimized** and **Optimal** to show the segment reversal.
-4. **Custom stops:** click map nodes to add or remove stops, then optimize again.
-5. **Simulation replay:** press Play on the playback scrubber to show the animated vehicle.
+1. **Dashboard overview:** open `http://localhost:3000` (or `http://localhost:5001` after `npm run build:frontend && npm start`). Pick **"Downtown Metro Grid"** with the default 4 stops. Capture the route planner panel (status "Engine ready"), the map and the legend.
+2. **Optimization result:** click **"Optimize Route"**. Capture the route on the map and the results panel: 5.10 km, 350 m (6.4%) shorter than Nearest Neighbor, 0.0% optimality gap, and the Stages bars.
+3. **Algorithm comparison:** under "Route on map", switch between **Nearest Neighbor**, **Optimized (2-Opt + Or-opt)** and **Optimal (Held-Karp)** to show the segment reversal. The Manifest lists each leg with running totals.
+4. **Custom stops:** click map locations to add or remove stops (Reset / Clear in the panel), then optimize again.
+5. **Simulation replay:** press Play on the scrubber at the bottom to show the animated vehicle.
 6. **Benchmark & tests:** run `npm run bench` and `npm test` and capture the terminal output.
