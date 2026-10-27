@@ -2,9 +2,8 @@
 .DS_Store
 Thumbs.db
 
-# Dependencies
+# Dependencies (package-lock.json is committed for reproducible installs)
 node_modules/
-package-lock.json
 
 # Build outputs
 dist/
