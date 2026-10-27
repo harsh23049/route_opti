@@ -1,156 +1,254 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import Header from './components/Header';
+import CityMap from './components/CityMap';
+import MetricCards from './components/MetricCards';
+import RouteControls from './components/RouteControls';
+import StopItinerary from './components/StopItinerary';
+import { SAMPLE_PRESETS } from './data/sampleCityGraph';
+import { checkBackendHealth, optimizeRoute } from './services/optimizerApi';
 
 export default function App() {
-  const [backendStatus, setBackendStatus] = useState('checking');
-  const [backendMeta, setBackendMeta] = useState(null);
+  // Preset and graph selection state
+  const [selectedPresetId, setSelectedPresetId] = useState(SAMPLE_PRESETS[0].id);
+  const activePreset = useMemo(() => {
+    return SAMPLE_PRESETS.find((p) => p.id === selectedPresetId) || SAMPLE_PRESETS[0];
+  }, [selectedPresetId]);
 
+  const [selectedStopCount, setSelectedStopCount] = useState(activePreset.defaultStopCount);
+
+  // Synchronize stop count when switching presets
+  const handlePresetChange = (newPresetId) => {
+    setSelectedPresetId(newPresetId);
+    const targetPreset = SAMPLE_PRESETS.find((p) => p.id === newPresetId) || SAMPLE_PRESETS[0];
+    setSelectedStopCount(targetPreset.defaultStopCount);
+    setRouteData(null);
+    setErrorMessage(null);
+    setSimulationProgress(0);
+    setIsPlaying(false);
+  };
+
+  // Derive active customer stops according to stop count selector
+  const activeStops = useMemo(() => {
+    return activePreset.availableCustomerStops.slice(0, selectedStopCount);
+  }, [activePreset, selectedStopCount]);
+
+  // Node Map for fast node info lookups
+  const nodeMap = useMemo(() => {
+    const map = new Map();
+    activePreset.nodes.forEach((n) => map.set(n.id, n));
+    return map;
+  }, [activePreset]);
+
+  // System state
+  const [backendHealth, setBackendHealth] = useState({ online: false, executableExists: false });
+  const [routeData, setRouteData] = useState(null);
+  const [activeAlgorithm, setActiveAlgorithm] = useState('two_opt');
+  const [isLoading, setIsLoading] = useState(false);
+  const [errorMessage, setErrorMessage] = useState(null);
+  const [selectedNodeId, setSelectedNodeId] = useState(null);
+
+  // Simulation playback state
+  const [simulationProgress, setSimulationProgress] = useState(0);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const animationRef = useRef(null);
+
+  // 1. Initial health probe on mount
   useEffect(() => {
-    fetch('/api/health')
-      .then((res) => {
-        if (!res.ok) throw new Error(`HTTP error ${res.status}`);
-        return res.json();
-      })
-      .then((data) => {
-        setBackendStatus('connected');
-        setBackendMeta(data);
-      })
-      .catch(() => {
-        setBackendStatus('disconnected');
-      });
+    let isMounted = true;
+    const probe = async () => {
+      const health = await checkBackendHealth();
+      if (isMounted) setBackendHealth(health);
+    };
+    probe();
+    const interval = setInterval(probe, 10000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
+  // 2. Playback animation loop
+  useEffect(() => {
+    if (!isPlaying) {
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
+      return;
+    }
+
+    let lastTime = performance.now();
+    const loop = (currentTime) => {
+      const dt = (currentTime - lastTime) / 1000;
+      lastTime = currentTime;
+
+      setSimulationProgress((prev) => {
+        const next = prev + dt * 0.15; // Complete tour in ~6.5 seconds
+        if (next >= 1.0) {
+          setIsPlaying(false);
+          return 1.0;
+        }
+        return next;
+      });
+
+      animationRef.current = requestAnimationFrame(loop);
+    };
+
+    animationRef.current = requestAnimationFrame(loop);
+
+    return () => {
+      if (animationRef.current) cancelAnimationFrame(animationRef.current);
+    };
+  }, [isPlaying]);
+
+  // 3. Execution handler invoking Express API -> C++ binary
+  const handleExecuteOptimization = async (targetAlgorithm) => {
+    setIsLoading(true);
+    setErrorMessage(null);
+    setIsPlaying(false);
+    setSimulationProgress(0);
+
+    const payload = {
+      warehouse: activePreset.warehouse,
+      stops: activeStops,
+      nodes: activePreset.nodes,
+      roads: activePreset.roads
+    };
+
+    try {
+      const result = await optimizeRoute(payload);
+      setRouteData(result);
+      setActiveAlgorithm(targetAlgorithm);
+      setSimulationProgress(0);
+    } catch (err) {
+      console.error('[App] Optimization request failed:', err);
+      setErrorMessage(err.message || 'An unexpected error occurred during optimization');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
+    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans antialiased selection:bg-cyan-500 selection:text-slate-950">
       {/* Header */}
-      <header className="border-b border-slate-800 bg-slate-900/60 backdrop-blur px-6 py-4 flex items-center justify-between">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-pulse" />
-            <h1 className="text-lg font-bold text-white tracking-tight">
-              Smart Delivery Route Optimization
-            </h1>
-          </div>
-          <p className="text-xs text-slate-400 mt-0.5">
-            College Algorithms Mini-Project • C++17 Engine + Express + React + SVG
-          </p>
-        </div>
+      <Header backendHealth={backendHealth} />
 
-        <div className="flex items-center gap-2 text-xs">
-          <span className="text-slate-400">Backend API:</span>
-          {backendStatus === 'connected' && (
-            <span className="px-2 py-0.5 rounded bg-emerald-500/20 text-emerald-400 font-medium border border-emerald-500/30">
-              Online
+      {/* Main Container */}
+      <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 space-y-5">
+        {/* Error Notification Alert */}
+        {errorMessage && (
+          <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-300 flex items-start justify-between gap-3 text-xs shadow-lg animate-fadeIn">
+            <div className="flex items-center gap-2">
+              <span className="w-2 h-2 rounded-full bg-rose-400 shrink-0" />
+              <span>{errorMessage}</span>
+            </div>
+            <button
+              onClick={() => setErrorMessage(null)}
+              className="text-rose-400 hover:text-rose-200 font-bold ml-2"
+            >
+              ✕
+            </button>
+          </div>
+        )}
+
+        {/* Backend Offline Warning Banner */}
+        {!backendHealth.online && (
+          <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-center justify-between gap-2 shadow-sm">
+            <span>
+              <strong>Backend Offline:</strong> Start the Express API server with{' '}
+              <code className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-amber-200">
+                cd backend && npm start
+              </code>{' '}
+              to run C++ optimization requests.
             </span>
-          )}
-          {backendStatus === 'checking' && (
-            <span className="px-2 py-0.5 rounded bg-amber-500/20 text-amber-400 font-medium border border-amber-500/30">
-              Checking...
-            </span>
-          )}
-          {backendStatus === 'disconnected' && (
-            <span className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-400 font-medium border border-rose-500/30">
-              Offline (Start backend on :5001)
-            </span>
-          )}
-        </div>
-      </header>
+          </div>
+        )}
 
-      {/* Main Content Area */}
-      <main className="flex-1 p-6 max-w-6xl w-full mx-auto space-y-6">
-        {/* System Architecture Cards */}
-        <section className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800">
-            <div className="text-xs font-semibold text-emerald-400 uppercase tracking-wider">
-              Core Engine
-            </div>
-            <div className="text-base font-bold text-white mt-1">C++17 Algorithms</div>
-            <p className="text-xs text-slate-400 mt-1">
-              Dijkstra shortest path, Nearest Neighbor heuristic, 2-Opt optimization.
-            </p>
+        {/* Metric Cards Row */}
+        <MetricCards
+          initialDistance={routeData?.initialDistance}
+          optimizedDistance={routeData?.optimizedDistance}
+          distanceSaved={routeData?.distanceSaved}
+          improvementPercent={routeData?.improvementPercent}
+          executionTimeMs={routeData?.executionTimeMs}
+          hasResult={Boolean(routeData)}
+        />
+
+        {/* Dashboard Grid: Map on Left, Itinerary & Info on Right */}
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
+          {/* Left Column: Simulated SVG City Map & Controls (8 cols) */}
+          <div className="lg:col-span-8 space-y-5">
+            <CityMap
+              graph={activePreset}
+              activeRouteData={routeData}
+              activeAlgorithm={activeAlgorithm}
+              simulationProgress={simulationProgress}
+              selectedNodeId={selectedNodeId}
+              onSelectNode={setSelectedNodeId}
+            />
+
+            <RouteControls
+              presets={SAMPLE_PRESETS}
+              selectedPresetId={selectedPresetId}
+              onChangePreset={handlePresetChange}
+              availableCustomerStops={activePreset.availableCustomerStops}
+              selectedStopCount={selectedStopCount}
+              onChangeStopCount={setSelectedStopCount}
+              activeAlgorithm={activeAlgorithm}
+              onChangeActiveAlgorithm={setActiveAlgorithm}
+              isLoading={isLoading}
+              onRunNearestNeighbor={() => handleExecuteOptimization('nearest_neighbor')}
+              onRunTwoOpt={() => handleExecuteOptimization('two_opt')}
+              hasResult={Boolean(routeData)}
+              isPlaying={isPlaying}
+              onTogglePlay={() => setIsPlaying((p) => !p)}
+              simulationProgress={simulationProgress}
+              onChangeProgress={(p) => {
+                setIsPlaying(false);
+                setSimulationProgress(p);
+              }}
+            />
           </div>
 
-          <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800">
-            <div className="text-xs font-semibold text-cyan-400 uppercase tracking-wider">
-              API Bridge
-            </div>
-            <div className="text-base font-bold text-white mt-1">Node.js + Express</div>
-            <p className="text-xs text-slate-400 mt-1">
-              Validates route payloads and bridges request execution to C++ engine.
-            </p>
-          </div>
+          {/* Right Column: Dispatch Itinerary & Graph Specs (4 cols) */}
+          <div className="lg:col-span-4 space-y-5">
+            <StopItinerary
+              routeData={routeData}
+              activeAlgorithm={activeAlgorithm}
+              nodeMap={nodeMap}
+              warehouseId={activePreset.warehouse}
+              selectedNodeId={selectedNodeId}
+              onSelectNode={setSelectedNodeId}
+            />
 
-          <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800">
-            <div className="text-xs font-semibold text-indigo-400 uppercase tracking-wider">
-              User Interface
-            </div>
-            <div className="text-base font-bold text-white mt-1">React + Tailwind</div>
-            <p className="text-xs text-slate-400 mt-1">
-              Interactive dashboard with algorithm controls and real-time metrics.
-            </p>
-          </div>
-
-          <div className="p-4 rounded-xl bg-slate-900/80 border border-slate-800">
-            <div className="text-xs font-semibold text-amber-400 uppercase tracking-wider">
-              Simulation Map
-            </div>
-            <div className="text-base font-bold text-white mt-1">Native SVG Canvas</div>
-            <p className="text-xs text-slate-400 mt-1">
-              Simulated city grid and road network without external cloud map APIs.
-            </p>
-          </div>
-        </section>
-
-        {/* Simulated Map Placeholder Canvas */}
-        <section className="p-6 rounded-2xl bg-slate-900/50 border border-slate-800 space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-bold text-white">Simulated City Road Map Canvas</h2>
-            <span className="text-xs text-slate-400">Pure SVG • No external map dependencies</span>
-          </div>
-
-          <div className="w-full h-80 rounded-xl bg-slate-950 border border-slate-800 relative overflow-hidden flex items-center justify-center">
-            {/* SVG Grid Background Preview */}
-            <svg className="w-full h-full" viewBox="0 0 600 300">
-              <defs>
-                <pattern id="grid" width="30" height="30" patternUnits="userSpaceOnUse">
-                  <path d="M 30 0 L 0 0 0 30" fill="none" stroke="#1e293b" strokeWidth="1" />
-                </pattern>
-              </defs>
-              <rect width="100%" height="100%" fill="url(#grid)" />
-
-              {/* Sample Road Segments */}
-              <line x1="80" y1="60" x2="280" y2="60" stroke="#334155" strokeWidth="4" strokeLinecap="round" />
-              <line x1="280" y1="60" x2="480" y2="60" stroke="#334155" strokeWidth="4" strokeLinecap="round" />
-              <line x1="80" y1="60" x2="80" y2="220" stroke="#334155" strokeWidth="4" strokeLinecap="round" />
-              <line x1="280" y1="60" x2="280" y2="220" stroke="#334155" strokeWidth="4" strokeLinecap="round" />
-              <line x1="480" y1="60" x2="480" y2="220" stroke="#334155" strokeWidth="4" strokeLinecap="round" />
-              <line x1="80" y1="220" x2="480" y2="220" stroke="#334155" strokeWidth="4" strokeLinecap="round" />
-
-              {/* Sample Nodes */}
-              <circle cx="80" cy="60" r="7" fill="#f59e0b" />
-              <text x="80" y="45" fill="#f59e0b" fontSize="10" fontWeight="bold" textAnchor="middle">Depot</text>
-
-              <circle cx="280" cy="60" r="5" fill="#10b981" />
-              <circle cx="480" cy="60" r="5" fill="#10b981" />
-              <circle cx="280" cy="220" r="5" fill="#10b981" />
-              <circle cx="480" cy="220" r="5" fill="#10b981" />
-              <circle cx="80" cy="220" r="5" fill="#10b981" />
-            </svg>
-
-            <div className="absolute inset-0 bg-slate-950/40 backdrop-blur-[1px] flex flex-col items-center justify-center p-4 text-center pointer-events-none">
-              <span className="px-3 py-1 rounded-full bg-slate-800/90 border border-slate-700 text-xs font-semibold text-slate-300">
-                Monorepo Scaffolding Complete
-              </span>
-              <p className="text-xs text-slate-400 mt-2 max-w-md">
-                Frontend, backend, and C++ algorithm builds configured. Ready for algorithm and visualization implementation.
+            {/* Active Graph Specifications Card */}
+            <div className="p-4 rounded-2xl bg-slate-900/80 border border-slate-800 text-xs space-y-2.5">
+              <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                <span className="font-bold text-white uppercase tracking-wider text-[11px]">
+                  Graph Network Topology
+                </span>
+                <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono text-[10px]">
+                  Sample Data
+                </span>
+              </div>
+              <p className="text-slate-400 text-[11px] leading-relaxed">
+                {activePreset.description}
               </p>
+              <div className="grid grid-cols-2 gap-2 pt-1 font-mono text-[11px]">
+                <div className="p-2 rounded-lg bg-slate-800/60 border border-slate-750">
+                  <div className="text-slate-400 text-[10px] uppercase font-sans">Total Nodes</div>
+                  <div className="text-white font-bold mt-0.5">{activePreset.nodes.length}</div>
+                </div>
+                <div className="p-2 rounded-lg bg-slate-800/60 border border-slate-750">
+                  <div className="text-slate-400 text-[10px] uppercase font-sans">Road Edges</div>
+                  <div className="text-white font-bold mt-0.5">{activePreset.roads.length}</div>
+                </div>
+              </div>
             </div>
           </div>
-        </section>
+        </div>
       </main>
 
       {/* Footer */}
       <footer className="border-t border-slate-800 px-6 py-3 text-center text-xs text-slate-500">
-        Smart Delivery Route Optimization • College Mini-Project • C++17 / Express / React / Tailwind
+        Smart Delivery Route Optimization • College Algorithms Mini-Project • C++17 Core / Express API / Native SVG Map
       </footer>
     </div>
   );
