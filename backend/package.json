@@ -1,12 +1,16 @@
 {
   "name": "smart-delivery-optimizer-backend",
-  "version": "1.0.0",
+  "version": "2.0.0",
+  "private": true,
   "description": "Express API bridge for Smart Delivery Route Optimization",
   "main": "src/app.js",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node src/app.js",
     "dev": "node --watch src/app.js",
-    "test": "node tests/backendTests.js"
+    "test": "node --test tests/api.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

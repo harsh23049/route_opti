@@ -2,46 +2,51 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const config = require('../config');
 
-/**
- * Executes the compiled C++ optimization engine via child_process.spawn.
- * Uses structured pipes for stdin and stdout.
- * Never invokes a shell or concatenates user input into command lines.
- *
- * @param {Object} payload Normalized JSON payload
- * @param {number} [timeoutMs] Timeout in milliseconds
- * @returns {Promise<Object>} Parsed JSON response from C++ engine
- */
-function runOptimizer(payload, timeoutMs = config.executionTimeoutMs) {
-  return new Promise((resolve, reject) => {
-    // 1. Verify executable exists
-    if (!fs.existsSync(config.cppExecutablePath)) {
-      const err = new Error(
-        `C++ optimizer executable not found at: '${config.cppExecutablePath}'. ` +
-        `Please build it using: cmake -B algorithms/build -S algorithms && cmake --build algorithms/build`
-      );
-      err.code = 'EXECUTABLE_NOT_FOUND';
-      err.statusCode = 500;
-      return reject(err);
-    }
+function httpError(message, code, statusCode) {
+  const err = new Error(message);
+  err.code = code;
+  err.statusCode = statusCode;
+  return err;
+}
 
-    // 2. Spawn C++ process with direct binary invocation (no shell)
-    const proc = spawn(config.cppExecutablePath, [], {
-      stdio: ['pipe', 'pipe', 'pipe']
-    });
+// Bounded job pool: at most maxConcurrentJobs engine processes, up to maxQueuedJobs waiting.
+let activeJobs = 0;
+const waiting = [];
+
+async function acquireSlot() {
+  if (activeJobs < config.maxConcurrentJobs) {
+    activeJobs++;
+    return;
+  }
+  if (waiting.length >= config.maxQueuedJobs) {
+    throw httpError('Optimization engine is busy, please retry shortly', 'ENGINE_BUSY', 503);
+  }
+  // release() hands its slot straight to the next waiter, so activeJobs is unchanged here.
+  await new Promise((resolve) => waiting.push(resolve));
+}
+
+function releaseSlot() {
+  const next = waiting.shift();
+  if (next) next();
+  else activeJobs--;
+}
+
+/**
+ * Runs one engine process: writes the payload to stdin and parses the JSON on stdout.
+ * Never invokes a shell or puts user input on the command line.
+ */
+function spawnEngine(payload, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const proc = spawn(config.cppExecutablePath, [], { stdio: ['pipe', 'pipe', 'pipe'] });
 
     let stdoutData = '';
     let stderrData = '';
     let isTimedOut = false;
 
-    // 3. Set execution timeout guard
+    // The engine holds no external resources, so a hard kill is safe.
     const timer = setTimeout(() => {
       isTimedOut = true;
-      proc.kill('SIGTERM');
-      setTimeout(() => {
-        try {
-          proc.kill('SIGKILL');
-        } catch (_) {}
-      }, 500);
+      proc.kill('SIGKILL');
     }, timeoutMs);
 
     proc.stdout.on('data', (chunk) => {
@@ -53,7 +58,7 @@ function runOptimizer(payload, timeoutMs = config.executionTimeoutMs) {
     });
 
     proc.stdin.on('error', (err) => {
-      // Catch EPIPE if process terminated early
+      // EPIPE means the process exited before reading all input; 'close' reports the outcome.
       if (err.code !== 'EPIPE') {
         console.error('[cppRunner] Stdin error:', err);
       }
@@ -61,43 +66,33 @@ function runOptimizer(payload, timeoutMs = config.executionTimeoutMs) {
 
     proc.on('error', (err) => {
       clearTimeout(timer);
-      err.statusCode = 500;
-      reject(err);
+      console.error('[cppRunner] Failed to start engine:', err);
+      reject(httpError('Failed to start optimization engine', 'ENGINE_START_FAILED', 500));
     });
 
-    proc.on('close', (code, signal) => {
+    proc.on('close', (code) => {
       clearTimeout(timer);
 
       if (isTimedOut) {
-        const timeoutErr = new Error(`Optimization process timed out after ${timeoutMs}ms`);
-        timeoutErr.code = 'PROCESS_TIMEOUT';
-        timeoutErr.statusCode = 504;
-        return reject(timeoutErr);
+        return reject(httpError(`Optimization process timed out after ${timeoutMs}ms`, 'PROCESS_TIMEOUT', 504));
       }
 
       if (stderrData.trim()) {
         console.warn(`[cppRunner stderr] ${stderrData.trim()}`);
       }
 
-      // Check if stdout contains valid JSON even on error exit
+      // The engine prints one JSON document even when it exits non-zero.
       let parsed;
       try {
         parsed = JSON.parse(stdoutData.trim());
-      } catch (parseErr) {
-        const err = new Error(
-          `C++ optimizer exited with code ${code} and non-JSON output. ` +
-          `Stderr: ${stderrData.trim() || 'none'}`
-        );
-        err.code = 'MALFORMED_ENGINE_OUTPUT';
-        err.statusCode = 500;
-        return reject(err);
+      } catch {
+        console.error(`[cppRunner] Engine exited with code ${code} and non-JSON output. Stderr: ${stderrData.trim() || 'none'}`);
+        return reject(httpError('Optimization engine returned malformed output', 'MALFORMED_ENGINE_OUTPUT', 500));
       }
 
-      // If C++ returned an application-level algorithm error (e.g. unreachable stops)
+      // Application-level algorithm error (e.g. unreachable stops)
       if (parsed.success === false) {
-        const algoErr = new Error(parsed.error || 'Optimization failed in C++ engine');
-        algoErr.code = 'ALGORITHM_ERROR';
-        algoErr.statusCode = 400;
+        const algoErr = httpError(parsed.error || 'Optimization failed in C++ engine', 'ALGORITHM_ERROR', 400);
         algoErr.details = parsed;
         return reject(algoErr);
       }
@@ -105,16 +100,33 @@ function runOptimizer(payload, timeoutMs = config.executionTimeoutMs) {
       resolve(parsed);
     });
 
-    // 4. Send payload via stdin and close stream
-    try {
-      proc.stdin.write(JSON.stringify(payload));
-      proc.stdin.end();
-    } catch (writeErr) {
-      clearTimeout(timer);
-      writeErr.statusCode = 500;
-      reject(writeErr);
-    }
+    proc.stdin.end(JSON.stringify(payload));
   });
+}
+
+/**
+ * Executes the compiled C++ optimization engine for a validated payload.
+ *
+ * @param {Object} payload Normalized JSON payload
+ * @param {number} [timeoutMs] Timeout in milliseconds
+ * @returns {Promise<Object>} Parsed JSON response from C++ engine
+ */
+async function runOptimizer(payload, timeoutMs = config.executionTimeoutMs) {
+  if (!fs.existsSync(config.cppExecutablePath)) {
+    console.error(`[cppRunner] Engine binary not found at ${config.cppExecutablePath}`);
+    throw httpError(
+      'C++ optimizer executable not found. Build it with: npm run build:cpp',
+      'EXECUTABLE_NOT_FOUND',
+      500
+    );
+  }
+
+  await acquireSlot();
+  try {
+    return await spawnEngine(payload, timeoutMs);
+  } finally {
+    releaseSlot();
+  }
 }
 
 module.exports = {

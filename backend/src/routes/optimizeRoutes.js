@@ -8,15 +8,14 @@ const { runOptimizer } = require('../services/cppRunner');
 /**
  * GET /api/health
  * System health and C++ binary availability check.
+ * The binary path stays in server logs; it is not exposed to clients.
  */
 router.get('/health', (req, res) => {
-  const binaryExists = fs.existsSync(config.cppExecutablePath);
   res.json({
     status: 'ok',
     service: 'delivery-optimizer-backend',
     executable: {
-      path: config.cppExecutablePath,
-      exists: binaryExists
+      exists: fs.existsSync(config.cppExecutablePath)
     },
     timestamp: new Date().toISOString()
   });
@@ -43,9 +42,12 @@ router.post('/optimize', async (req, res) => {
     return res.json(result);
   } catch (err) {
     const status = err.statusCode || 500;
+    if (status >= 500 && err.code !== 'ENGINE_BUSY') {
+      console.error('[optimize] Engine failure:', err);
+    }
     return res.status(status).json({
       success: false,
-      error: err.message,
+      error: err.code ? err.message : 'Internal server error',
       code: err.code || 'INTERNAL_ERROR'
     });
   }

@@ -1,249 +1,189 @@
-const http = require('http');
+/**
+ * Backend API tests (node:test). Exercises validation, error mapping and the real C++ engine.
+ * Requires the engine to be built first: npm run build:cpp
+ */
+const { describe, it, before, after } = require('node:test');
+const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const assert = require('assert');
 const app = require('../src/app');
+const config = require('../src/config');
 
-const TEST_PORT = 5088;
 let server;
+let baseUrl;
 
-function makeRequest(options, postData = null) {
-  return new Promise((resolve, reject) => {
-    const req = http.request(
-      {
-        hostname: '127.0.0.1',
-        port: TEST_PORT,
-        ...options
-      },
-      (res) => {
-        let data = '';
-        res.on('data', (chunk) => (data += chunk));
-        res.on('end', () => {
-          let json = null;
-          try {
-            json = JSON.parse(data);
-          } catch (_) {}
-          resolve({ status: res.statusCode, headers: res.headers, body: json, rawBody: data });
-        });
-      }
-    );
-
-    req.on('error', reject);
-
-    if (postData) {
-      req.write(typeof postData === 'string' ? postData : JSON.stringify(postData));
-    }
-    req.end();
+async function request(method, urlPath, body, headers = {}) {
+  const res = await fetch(`${baseUrl}${urlPath}`, {
+    method,
+    headers: { 'Content-Type': 'application/json', ...headers },
+    body: body === undefined ? undefined : typeof body === 'string' ? body : JSON.stringify(body)
   });
+  const text = await res.text();
+  let json = null;
+  try {
+    json = JSON.parse(text);
+  } catch {
+    // non-JSON body; tests that care assert on status
+  }
+  return { status: res.status, headers: res.headers, body: json };
 }
 
-async function runTests() {
-  console.log('======================================================================');
-  console.log('  BACKEND EXPRESS API & C++ ENGINE INTEGRATION TEST SUITE');
-  console.log('======================================================================\n');
+const post = (body) => request('POST', '/api/optimize', body);
 
-  // Start test server
+const twoNodeGraph = (roadOverrides = {}) => ({
+  warehouse: 'node_0',
+  stops: ['node_1'],
+  nodes: [{ id: 'node_0', lat: 0, lng: 0 }, { id: 'node_1', lat: 1, lng: 1 }],
+  roads: [{ source: 'node_0', target: 'node_1', distance_km: 2.5, ...roadOverrides }]
+});
+
+before(async () => {
   await new Promise((resolve) => {
-    server = app.listen(TEST_PORT, resolve);
+    server = app.listen(0, '127.0.0.1', resolve);
+  });
+  baseUrl = `http://127.0.0.1:${server.address().port}`;
+});
+
+after(() => new Promise((resolve) => server.close(resolve)));
+
+describe('GET /api/health', () => {
+  it('returns 200 and confirms the C++ binary exists without leaking its path', async () => {
+    const res = await request('GET', '/api/health');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.status, 'ok');
+    assert.equal(res.body.executable.exists, true, 'C++ executable must exist on disk (npm run build:cpp)');
+    assert.equal(res.body.executable.path, undefined);
   });
 
-  let totalTests = 0;
-  let passedTests = 0;
+  it('sends CORS headers for the dev frontend and hides x-powered-by', async () => {
+    const res = await request('GET', '/api/health', undefined, { Origin: 'http://localhost:3000' });
+    assert.equal(res.headers.get('access-control-allow-origin'), 'http://localhost:3000');
+    assert.equal(res.headers.get('x-powered-by'), null);
+  });
+});
 
-  async function test(name, fn) {
-    totalTests++;
-    try {
-      await fn();
-      passedTests++;
-      console.log(`[PASS] ${name}`);
-    } catch (err) {
-      console.error(`[FAIL] ${name}:`, err.message);
-    }
-  }
+describe('POST /api/optimize — engine results', () => {
+  it('returns the C++ route, geometry and exact optimum for the sample graph', async () => {
+    const sampleInput = JSON.parse(
+      fs.readFileSync(path.resolve(__dirname, '../../data/sample-input.json'), 'utf8')
+    );
+    const res = await post(sampleInput);
 
-  // 1. Test GET /api/health
-  await test('GET /api/health returns 200 OK and confirms C++ binary exists', async () => {
-    const res = await makeRequest({ path: '/api/health', method: 'GET' });
-    assert.strictEqual(res.status, 200);
-    assert.strictEqual(res.body.status, 'ok');
-    assert.strictEqual(res.body.executable.exists, true, 'C++ executable must exist on disk');
+    assert.equal(res.status, 200);
+    assert.equal(res.body.success, true);
+    assert.equal(res.body.initialDistance, 5.45);
+    assert.equal(res.body.optimizedDistance, 5.1);
+    assert.equal(res.body.distanceSaved, 0.35);
+    assert.equal(typeof res.body.executionTimeMs, 'number');
+
+    // 2-Opt reverses the node_1/node_2 segment of the greedy tour
+    assert.deepEqual(res.body.initialRoute, ['node_0', 'node_1', 'node_2', 'node_3', 'node_4', 'node_0']);
+    assert.deepEqual(res.body.optimizedRoute, ['node_0', 'node_2', 'node_1', 'node_3', 'node_4', 'node_0']);
+
+    assert.equal(res.body.legs.length, 5);
+    assert.deepEqual(res.body.legs[0].pathNodes, ['node_0', 'j_1', 'node_2']);
+    assert.equal(res.body.legs[0].coordinates.length, 3);
+    assert.equal(res.body.fullRoadPath.length, 9);
+
+    // 4 stops <= Held-Karp limit, so the exact optimum is reported
+    assert.equal(res.body.optimalDistance, 5.1);
+    assert.equal(res.body.optimalityGapPercent, 0);
+    assert.equal(res.body.optimalLegs.length, 5);
+    assert.deepEqual(res.body.stages.map((s) => s.distanceKm), [5.45, 5.1, 5.1]);
   });
 
-  // 2. Test CORS headers for local frontend origin
-  await test('CORS headers allow http://localhost:3000', async () => {
-    const res = await makeRequest({
-      path: '/api/health',
-      method: 'GET',
-      headers: { Origin: 'http://localhost:3000' }
+  it('maps an unreachable stop reported by C++ to 400 ALGORITHM_ERROR', async () => {
+    const res = await post({
+      warehouse: 'W',
+      stops: ['S1', 'ISLAND'],
+      nodes: [{ id: 'W' }, { id: 'S1' }, { id: 'ISLAND' }],
+      roads: [{ source: 'W', target: 'S1', distance_km: 1.0 }]
     });
-    assert.strictEqual(res.headers['access-control-allow-origin'], 'http://localhost:3000');
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 'ALGORITHM_ERROR');
+    assert.match(res.body.error, /Unreachable location/);
   });
 
-  // 3. Test POST /api/optimize with real sample graph
-  await test('POST /api/optimize returns valid C++ route calculation and geometry', async () => {
-    const sampleInputPath = path.resolve(__dirname, '../../data/sample-input.json');
-    const sampleInput = JSON.parse(fs.readFileSync(sampleInputPath, 'utf8'));
+  it('returns 503 ENGINE_BUSY when the job pool and queue are full', async () => {
+    const saved = { jobs: config.maxConcurrentJobs, queue: config.maxQueuedJobs };
+    config.maxConcurrentJobs = 0;
+    config.maxQueuedJobs = 0;
+    try {
+      const res = await post(twoNodeGraph());
+      assert.equal(res.status, 503);
+      assert.equal(res.body.code, 'ENGINE_BUSY');
+    } finally {
+      config.maxConcurrentJobs = saved.jobs;
+      config.maxQueuedJobs = saved.queue;
+    }
+  });
+});
 
-    const res = await makeRequest(
-      {
-        path: '/api/optimize',
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      },
-      sampleInput
-    );
+describe('POST /api/optimize — validation', () => {
+  const expectValidationError = async (body, fragment) => {
+    const res = await post(body);
+    assert.equal(res.status, 400);
+    assert.equal(res.body.success, false);
+    assert.equal(res.body.code, 'VALIDATION_ERROR');
+    assert.ok(res.body.error.includes(fragment), `"${res.body.error}" should mention "${fragment}"`);
+  };
 
-    assert.strictEqual(res.status, 200);
-    assert.strictEqual(res.body.success, true);
+  it('rejects a missing warehouse', () =>
+    expectValidationError({ stops: ['node_1'], nodes: [{ id: 'node_1' }], roads: [] }, 'warehouse'));
 
-    // Verify values generated directly by compiled C++ binary
-    assert.strictEqual(res.body.initialDistance, 6.9);
-    assert.strictEqual(res.body.optimizedDistance, 6.9);
-    assert.strictEqual(res.body.distanceSaved, 0);
-    assert.strictEqual(typeof res.body.executionTimeMs, 'number');
+  it('rejects a non-existent delivery stop', () =>
+    expectValidationError({ ...twoNodeGraph(), stops: ['node_GHOST'] }, 'node_GHOST'));
 
-    // Verify route sequences
-    assert.deepStrictEqual(res.body.initialRoute, [
-      'node_0', 'node_5', 'node_4', 'node_3', 'node_1', 'node_2', 'node_0'
-    ]);
-    assert.deepStrictEqual(res.body.optimizedRoute, [
-      'node_0', 'node_5', 'node_4', 'node_3', 'node_1', 'node_2', 'node_0'
-    ]);
+  it('rejects a negative edge distance', () =>
+    expectValidationError(twoNodeGraph({ distance_km: -2.5 }), 'non-negative'));
 
-    // Verify legs and geometry for frontend rendering
-    assert.ok(Array.isArray(res.body.legs));
-    assert.strictEqual(res.body.legs.length, 6);
-    assert.strictEqual(res.body.legs[0].from, 'node_0');
-    assert.strictEqual(res.body.legs[0].to, 'node_5');
-    assert.ok(res.body.legs[0].coordinates.length >= 2);
+  it('rejects a missing distance instead of treating it as 0 km', () =>
+    expectValidationError(twoNodeGraph({ distance_km: undefined }), 'distance_km'));
 
-    assert.ok(Array.isArray(res.body.fullRoadPath));
-    assert.ok(res.body.fullRoadPath.length >= 7);
+  it('rejects legacy aliases (distanceKm, warehouseId, deliveryStops)', async () => {
+    await expectValidationError(twoNodeGraph({ distance_km: undefined, distanceKm: 1 }), 'distance_km');
+    const { warehouse, stops, ...rest } = twoNodeGraph();
+    await expectValidationError({ ...rest, warehouseId: warehouse, stops }, 'warehouse');
+    await expectValidationError({ ...rest, warehouse, deliveryStops: stops }, 'stops');
   });
 
-  // 4. Test Validation: Missing warehouse node ID
-  await test('POST /api/optimize returns 400 for missing warehouse ID', async () => {
-    const res = await makeRequest(
-      {
-        path: '/api/optimize',
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      },
-      {
-        stops: ['node_1'],
-        nodes: [{ id: 'node_1', lat: 0, lng: 0 }],
-        roads: []
-      }
-    );
-    assert.strictEqual(res.status, 400);
-    assert.strictEqual(res.body.success, false);
-    assert.strictEqual(res.body.code, 'VALIDATION_ERROR');
-    assert.ok(res.body.error.includes("warehouse"));
+  it('rejects object-shaped stops', () =>
+    expectValidationError({ ...twoNodeGraph(), stops: [{ id: 'node_1' }] }, 'Stop at index 0'));
+
+  it('rejects 1e400 (Infinity after JSON.parse) as a distance', async () => {
+    const raw = JSON.stringify(twoNodeGraph()).replace('2.5', '1e400');
+    await expectValidationError(raw, 'distance_km');
   });
 
-  // 5. Test Validation: Non-existent delivery stop ID
-  await test('POST /api/optimize returns 400 for non-existent delivery stop', async () => {
-    const res = await makeRequest(
-      {
-        path: '/api/optimize',
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      },
-      {
-        warehouse: 'node_0',
-        stops: ['node_GHOST'],
-        nodes: [{ id: 'node_0', lat: 0, lng: 0 }],
-        roads: []
-      }
-    );
-    assert.strictEqual(res.status, 400);
-    assert.strictEqual(res.body.success, false);
-    assert.strictEqual(res.body.code, 'VALIDATION_ERROR');
-    assert.ok(res.body.error.includes("node_GHOST"));
+  it('rejects out-of-range coordinates', () =>
+    expectValidationError(
+      { ...twoNodeGraph(), nodes: [{ id: 'node_0', lat: 91, lng: 0 }, { id: 'node_1' }] },
+      "'lat'"
+    ));
+
+  it('enforces the stop count limit', () =>
+    expectValidationError(
+      { ...twoNodeGraph(), stops: Array(config.limits.maxStops + 1).fill('node_1') },
+      'limit'
+    ));
+});
+
+describe('error handling', () => {
+  it('returns 400 JSON_SYNTAX_ERROR for malformed JSON', async () => {
+    const res = await post('{ bad json here: ');
+    assert.equal(res.status, 400);
+    assert.equal(res.body.code, 'JSON_SYNTAX_ERROR');
   });
 
-  // 6. Test Validation: Negative edge distance
-  await test('POST /api/optimize returns 400 for negative edge distance', async () => {
-    const res = await makeRequest(
-      {
-        path: '/api/optimize',
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      },
-      {
-        warehouse: 'node_0',
-        stops: ['node_1'],
-        nodes: [{ id: 'node_0', lat: 0, lng: 0 }, { id: 'node_1', lat: 1, lng: 1 }],
-        roads: [{ source: 'node_0', target: 'node_1', distance_km: -2.5 }]
-      }
-    );
-    assert.strictEqual(res.status, 400);
-    assert.strictEqual(res.body.success, false);
-    assert.strictEqual(res.body.code, 'VALIDATION_ERROR');
-    assert.ok(res.body.error.includes("non-negative"));
+  it('returns 413 PAYLOAD_TOO_LARGE above the body limit', async () => {
+    const res = await post(JSON.stringify({ padding: 'x'.repeat(3 * 1024 * 1024) }));
+    assert.equal(res.status, 413);
+    assert.equal(res.body.code, 'PAYLOAD_TOO_LARGE');
   });
 
-  // 7. Test C++ Engine Error: Unreachable delivery stop
-  await test('POST /api/optimize returns 400 when C++ reports unreachable stop', async () => {
-    const res = await makeRequest(
-      {
-        path: '/api/optimize',
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      },
-      {
-        warehouse: 'W',
-        stops: ['S1', 'ISLAND'],
-        nodes: [
-          { id: 'W', lat: 0, lng: 0 },
-          { id: 'S1', lat: 1, lng: 1 },
-          { id: 'ISLAND', lat: 5, lng: 5 }
-        ],
-        roads: [{ source: 'W', target: 'S1', distance_km: 1.0 }]
-      }
-    );
-    assert.strictEqual(res.status, 400);
-    assert.strictEqual(res.body.success, false);
-    assert.strictEqual(res.body.code, 'ALGORITHM_ERROR');
-    assert.ok(res.body.error.includes("Unreachable location"));
+  it('returns 404 NOT_FOUND for unknown API routes', async () => {
+    const res = await request('GET', '/api/unknown-endpoint');
+    assert.equal(res.status, 404);
+    assert.equal(res.body.code, 'NOT_FOUND');
   });
-
-  // 8. Test Malformed JSON syntax handling
-  await test('POST /api/optimize returns 400 for malformed JSON syntax', async () => {
-    const res = await makeRequest(
-      {
-        path: '/api/optimize',
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      },
-      '{ bad json here: '
-    );
-    assert.strictEqual(res.status, 400);
-    assert.strictEqual(res.body.success, false);
-    assert.strictEqual(res.body.code, 'JSON_SYNTAX_ERROR');
-  });
-
-  // 9. Test Unknown Route
-  await test('Unknown route returns 404 NOT_FOUND', async () => {
-    const res = await makeRequest({ path: '/api/unknown-endpoint', method: 'GET' });
-    assert.strictEqual(res.status, 404);
-    assert.strictEqual(res.body.code, 'NOT_FOUND');
-  });
-
-  // Close server
-  await new Promise((resolve) => server.close(resolve));
-
-  console.log('\n======================================================================');
-  console.log(`SUMMARY: ${passedTests} / ${totalTests} tests passed`);
-  console.log('======================================================================');
-
-  if (passedTests !== totalTests) {
-    process.exit(1);
-  }
-}
-
-runTests().catch((err) => {
-  console.error('Test runner fatal error:', err);
-  if (server) server.close();
-  process.exit(1);
 });

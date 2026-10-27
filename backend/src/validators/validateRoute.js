@@ -1,149 +1,127 @@
+const config = require('../config');
+
 /**
- * Input validator for route optimization request payloads.
- * Validates graph structure, node IDs, non-negative edge weights,
- * warehouse existence, and required delivery stop IDs.
+ * Validator for POST /api/optimize — the API trust boundary.
+ *
+ * Schema (strict, no aliases):
+ *   {
+ *     warehouse: string,
+ *     stops: string[],
+ *     nodes: [{ id: string, name?: string, lat?: number, lng?: number }],
+ *     roads: [{ source: string, target: string, distance_km: number, street_name?: string }]
+ *   }
+ *
+ * Returns { isValid: true, normalizedPayload } or { isValid: false, error }.
  */
 
-function validateOptimizeInput(body) {
+const fail = (error) => ({ isValid: false, error });
+const isNonEmptyString = (value) => typeof value === 'string' && value.trim() !== '';
+const isFiniteInRange = (value, min, max) => Number.isFinite(value) && value >= min && value <= max;
+
+function validateOptimizeInput(body, limits = config.limits) {
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    return { isValid: false, error: 'Request body must be a valid JSON object' };
+    return fail('Request body must be a valid JSON object');
+  }
+  const { warehouse, stops, nodes, roads } = body;
+
+  // 1. Nodes
+  if (!Array.isArray(nodes) || nodes.length === 0) {
+    return fail("'nodes' must be a non-empty array of node objects");
+  }
+  if (nodes.length > limits.maxNodes) {
+    return fail(`'nodes' has ${nodes.length} entries; the limit is ${limits.maxNodes}`);
   }
 
-  // 1. Validate Nodes array
-  if (!Array.isArray(body.nodes) || body.nodes.length === 0) {
-    return { isValid: false, error: "'nodes' must be a non-empty array of node objects" };
-  }
-
-  const nodeSet = new Set();
+  const nodeIds = new Set();
   const normalizedNodes = [];
-
-  for (let i = 0; i < body.nodes.length; i++) {
-    const node = body.nodes[i];
+  for (const [i, node] of nodes.entries()) {
     if (!node || typeof node !== 'object') {
-      return { isValid: false, error: `Node at index ${i} must be an object` };
+      return fail(`Node at index ${i} must be an object`);
     }
-
-    if (typeof node.id !== 'string' || node.id.trim() === '') {
-      return { isValid: false, error: `Node at index ${i} must contain a non-empty string 'id'` };
+    if (!isNonEmptyString(node.id)) {
+      return fail(`Node at index ${i} must contain a non-empty string 'id'`);
     }
-
     const id = node.id.trim();
-    if (nodeSet.has(id)) {
-      return { isValid: false, error: `Duplicate node ID detected: '${id}'` };
+    if (nodeIds.has(id)) {
+      return fail(`Duplicate node ID detected: '${id}'`);
     }
-    nodeSet.add(id);
 
-    normalizedNodes.push({
-      id,
-      name: typeof node.name === 'string' ? node.name : id,
-      lat: typeof node.lat === 'number' ? node.lat : 0.0,
-      lng: typeof node.lng === 'number' ? node.lng : 0.0
-    });
-  }
-
-  // 2. Extract and Validate Warehouse ID
-  let warehouseId = null;
-  if (typeof body.warehouse === 'string' && body.warehouse.trim() !== '') {
-    warehouseId = body.warehouse.trim();
-  } else if (typeof body.warehouseId === 'string' && body.warehouseId.trim() !== '') {
-    warehouseId = body.warehouseId.trim();
-  } else if (body.depot) {
-    if (typeof body.depot === 'string' && body.depot.trim() !== '') {
-      warehouseId = body.depot.trim();
-    } else if (typeof body.depot === 'object' && typeof body.depot.id === 'string' && body.depot.id.trim() !== '') {
-      warehouseId = body.depot.id.trim();
+    const lat = node.lat ?? 0;
+    const lng = node.lng ?? 0;
+    if (!isFiniteInRange(lat, -90, 90) || !isFiniteInRange(lng, -180, 180)) {
+      return fail(`Node '${id}' must have numeric 'lat' in [-90, 90] and 'lng' in [-180, 180]`);
     }
+
+    nodeIds.add(id);
+    normalizedNodes.push({ id, name: typeof node.name === 'string' ? node.name : id, lat, lng });
   }
 
-  if (!warehouseId) {
-    return { isValid: false, error: "A valid 'warehouse' (or 'warehouseId' or 'depot.id') string is required" };
+  // 2. Warehouse
+  if (!isNonEmptyString(warehouse)) {
+    return fail("A valid 'warehouse' node ID string is required");
+  }
+  const warehouseId = warehouse.trim();
+  if (!nodeIds.has(warehouseId)) {
+    return fail(`Specified warehouse '${warehouseId}' does not exist in 'nodes'`);
   }
 
-  if (!nodeSet.has(warehouseId)) {
-    return { isValid: false, error: `Specified warehouse '${warehouseId}' does not exist in 'nodes'` };
+  // 3. Roads
+  if (!Array.isArray(roads)) {
+    return fail("'roads' must be an array of road edge objects");
   }
-
-  // 3. Validate Roads / Edges array
-  const rawRoads = body.roads || body.edges;
-  if (!Array.isArray(rawRoads)) {
-    return { isValid: false, error: "'roads' must be an array of road edge objects" };
+  if (roads.length > limits.maxRoads) {
+    return fail(`'roads' has ${roads.length} entries; the limit is ${limits.maxRoads}`);
   }
 
   const normalizedRoads = [];
-  for (let i = 0; i < rawRoads.length; i++) {
-    const road = rawRoads[i];
+  for (const [i, road] of roads.entries()) {
     if (!road || typeof road !== 'object') {
-      return { isValid: false, error: `Road at index ${i} must be an object` };
+      return fail(`Road at index ${i} must be an object`);
     }
-
-    const source = typeof road.source === 'string' ? road.source.trim() : '';
-    const target = typeof road.target === 'string' ? road.target.trim() : '';
-
+    const source = isNonEmptyString(road.source) ? road.source.trim() : '';
+    const target = isNonEmptyString(road.target) ? road.target.trim() : '';
     if (!source || !target) {
-      return { isValid: false, error: `Road at index ${i} must have non-empty 'source' and 'target' node IDs` };
+      return fail(`Road at index ${i} must have non-empty 'source' and 'target' node IDs`);
+    }
+    if (!nodeIds.has(source)) {
+      return fail(`Road at index ${i} references non-existent source node: '${source}'`);
+    }
+    if (!nodeIds.has(target)) {
+      return fail(`Road at index ${i} references non-existent target node: '${target}'`);
     }
 
-    if (!nodeSet.has(source)) {
-      return { isValid: false, error: `Road at index ${i} references non-existent source node: '${source}'` };
-    }
-
-    if (!nodeSet.has(target)) {
-      return { isValid: false, error: `Road at index ${i} references non-existent target node: '${target}'` };
-    }
-
-    // Determine distance/weight
-    let dist = road.distance_km;
-    if (dist === undefined) dist = road.distanceKm;
-    if (dist === undefined) dist = road.distance;
-    if (dist === undefined) dist = road.weight;
-
-    if (typeof dist !== 'number' || isNaN(dist) || dist < 0) {
-      return { isValid: false, error: `Road at index ${i} (${source} -> ${target}) must have a non-negative numeric distance` };
+    // Number.isFinite also rejects 1e400, which JSON.parse turns into Infinity.
+    const distance = road.distance_km;
+    if (!Number.isFinite(distance) || distance < 0) {
+      return fail(`Road at index ${i} (${source} -> ${target}) must have a finite, non-negative numeric 'distance_km'`);
     }
 
     normalizedRoads.push({
       source,
       target,
-      distance_km: dist,
+      distance_km: distance,
       street_name: typeof road.street_name === 'string' ? road.street_name : ''
     });
   }
 
-  // 4. Extract and Validate Required Delivery Stops
-  let rawStops = body.stops;
-  if (rawStops === undefined) rawStops = body.deliveryStops;
-  if (rawStops === undefined) rawStops = body.sampleDeliveryStops;
-
-  if (rawStops !== undefined && !Array.isArray(rawStops)) {
-    return { isValid: false, error: "'stops' must be an array of stop node IDs" };
+  // 4. Stops
+  if (!Array.isArray(stops) || stops.length === 0) {
+    return fail("'stops' must be a non-empty array of node ID strings");
+  }
+  if (stops.length > limits.maxStops) {
+    return fail(`'stops' has ${stops.length} entries; the limit is ${limits.maxStops}`);
   }
 
   const normalizedStops = [];
-  if (Array.isArray(rawStops)) {
-    for (let i = 0; i < rawStops.length; i++) {
-      const item = rawStops[i];
-      let stopId = '';
-      if (typeof item === 'string') {
-        stopId = item.trim();
-      } else if (item && typeof item === 'object') {
-        if (typeof item.id === 'string') stopId = item.id.trim();
-        else if (typeof item.nodeId === 'string') stopId = item.nodeId.trim();
-      }
-
-      if (!stopId) {
-        return { isValid: false, error: `Stop at index ${i} must specify a valid node ID` };
-      }
-
-      if (!nodeSet.has(stopId)) {
-        return { isValid: false, error: `Delivery stop '${stopId}' does not exist in 'nodes'` };
-      }
-
-      normalizedStops.push(stopId);
+  for (const [i, stop] of stops.entries()) {
+    if (!isNonEmptyString(stop)) {
+      return fail(`Stop at index ${i} must be a non-empty node ID string`);
     }
-  }
-
-  if (normalizedStops.length === 0) {
-    return { isValid: false, error: "At least one required delivery stop must be provided in 'stops'" };
+    const stopId = stop.trim();
+    if (!nodeIds.has(stopId)) {
+      return fail(`Delivery stop '${stopId}' does not exist in 'nodes'`);
+    }
+    normalizedStops.push(stopId);
   }
 
   return {
