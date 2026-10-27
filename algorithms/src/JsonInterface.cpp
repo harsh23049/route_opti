@@ -3,6 +3,7 @@
 #include "Optimizer.h"
 #include <iostream>
 #include <chrono>
+#include <cmath>
 
 namespace DeliveryOptimizer {
 
@@ -57,6 +58,27 @@ RouteGeometry buildGeometry(const Graph& graph, const DistanceMatrix& matrix,
     geo.fullCoordinates = JsonValue(std::vector<JsonValue>{});
     for (const auto& nodeId : fullPath) geo.fullCoordinates.push_back(coordinateOf(graph, nodeId));
     return geo;
+}
+
+JsonValue fleetJson(const Graph& graph, const DistanceMatrix& matrix, const FleetPlan& plan) {
+    JsonValue out;
+    out["totalDistance"] = plan.totalDistanceKm;
+    out["longestRoute"] = plan.longestRouteKm;
+    JsonValue routes(std::vector<JsonValue>{});
+    for (size_t i = 0; i < plan.routes.size(); ++i) {
+        const std::vector<std::string> tour = matrix.toIds(plan.routes[i].tour);
+        RouteGeometry geo = buildGeometry(graph, matrix, tour);
+        JsonValue r;
+        r["vehicle"] = static_cast<double>(i + 1);
+        r["route"] = toJsonArray(tour);
+        r["distance"] = plan.routes[i].distanceKm;
+        r["legs"] = geo.legs;
+        r["fullRoadPath"] = geo.fullRoadPath;
+        r["fullCoordinates"] = geo.fullCoordinates;
+        routes.push_back(r);
+    }
+    out["routes"] = routes;
+    return out;
 }
 
 std::string fieldError(const std::string& what, size_t index, const std::string& problem) {
@@ -148,8 +170,18 @@ std::string JsonInterface::processJson(const std::string& inputJson, bool* ok) {
         stops.push_back(stopsArr[i].asString());
     }
 
-    // 5. Run Core Optimization Pipeline
-    OptimizationPipelineResult pipeline = Optimizer::runPipeline(graph, warehouseId, stops);
+    // 5. Vehicles: optional integer in [1, Fleet::kMaxVehicles], default 1
+    int vehicles = 1;
+    if (!root["vehicles"].isNull()) {
+        const double count = root["vehicles"].asDouble(0.0);
+        if (!root["vehicles"].isNumber() || count != std::floor(count) || count < 1 || count > Fleet::kMaxVehicles) {
+            return errorJson("'vehicles' must be an integer from 1 to " + std::to_string(Fleet::kMaxVehicles));
+        }
+        vehicles = static_cast<int>(count);
+    }
+
+    // 6. Run Core Optimization Pipeline
+    OptimizationPipelineResult pipeline = Optimizer::runPipeline(graph, warehouseId, stops, vehicles);
     if (!pipeline.success) {
         return errorJson(pipeline.errorMessage);
     }
@@ -159,7 +191,7 @@ std::string JsonInterface::processJson(const std::string& inputJson, bool* ok) {
     const TourResult& optimized = pipeline.optimizedTour;
     const TourResult& exact = pipeline.exactTour;
 
-    // 6. Assemble Output JSON
+    // 7. Assemble Output JSON
     JsonValue response;
     response["success"] = true;
 
@@ -212,6 +244,22 @@ std::string JsonInterface::processJson(const std::string& inputJson, bool* ok) {
                                 "optimalLegs", "optimalFullRoadPath", "optimalFullCoordinates"}) {
             response[key] = JsonValue();
         }
+    }
+
+    // Multi-vehicle plan vs the equal-chunks baseline (null for a single van)
+    response["vehicles"] = static_cast<double>(vehicles);
+    if (vehicles > 1) {
+        const FleetPlan& base = pipeline.fleetBaseline;
+        const FleetPlan& best = pipeline.fleetOptimized;
+        JsonValue fleet;
+        fleet["baseline"] = fleetJson(graph, matrix, base);
+        fleet["optimized"] = fleetJson(graph, matrix, best);
+        const double longestSaved = std::max(0.0, base.longestRouteKm - best.longestRouteKm);
+        fleet["longestRouteSaved"] = longestSaved;
+        fleet["improvementPercent"] = base.longestRouteKm > 0.0 ? longestSaved / base.longestRouteKm * 100.0 : 0.0;
+        response["fleet"] = fleet;
+    } else {
+        response["fleet"] = JsonValue();
     }
 
     auto endTime = std::chrono::high_resolution_clock::now();

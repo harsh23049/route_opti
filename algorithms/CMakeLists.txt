@@ -27,6 +27,7 @@ add_library(optimizer_core STATIC
     src/TwoOpt.cpp
     src/OrOpt.cpp
     src/HeldKarp.cpp
+    src/Fleet.cpp
     src/RouteUtils.cpp
     src/Optimizer.cpp
     src/Json.cpp

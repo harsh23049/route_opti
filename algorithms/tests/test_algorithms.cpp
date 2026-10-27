@@ -5,6 +5,7 @@
 #include "TwoOpt.h"
 #include "OrOpt.h"
 #include "HeldKarp.h"
+#include "Fleet.h"
 #include "Optimizer.h"
 #include "RouteUtils.h"
 #include "Json.h"
@@ -15,6 +16,7 @@
 #include <vector>
 #include <string>
 #include <algorithm>
+#include <bitset>
 #include <numeric>
 #include <cmath>
 #include <limits>
@@ -894,6 +896,127 @@ void testJsonParserAndOptimalFields() {
 }
 
 // =============================================================================
+// Test Suite 16: Multi-Vehicle Split (Route First, Cluster Second)
+// =============================================================================
+
+// Every customer is served exactly once, every route is a closed depot loop with >= 1 stop.
+bool coversEachStopOnce(const FleetPlan& plan, size_t m) {
+    std::vector<int> seen(m, 0);
+    for (const auto& r : plan.routes) {
+        if (r.tour.size() < 3 || r.tour.front() != 0 || r.tour.back() != 0) return false;
+        for (size_t i = 1; i + 1 < r.tour.size(); ++i) seen[r.tour[i]]++;
+    }
+    return std::all_of(seen.begin() + 1, seen.end(), [](int c) { return c == 1; });
+}
+
+// Tries every way to cut a tour into <= k consecutive trips; returns the smallest longest trip.
+double bruteForceSplitLongest(const std::vector<int>& tour, const DistanceMatrix& m, int k) {
+    const int n = static_cast<int>(tour.size()) - 2;
+    double best = std::numeric_limits<double>::infinity();
+    for (unsigned mask = 0; mask < (1u << (n - 1)); ++mask) {  // bit i-1 set: cut after stop i
+        if (static_cast<int>(std::bitset<32>(mask).count()) + 1 > k) continue;
+        double longest = 0.0;
+        double trip = m.getDistance(0, tour[1]);
+        for (int i = 1; i <= n; ++i) {
+            if (i == n || ((mask >> (i - 1)) & 1u)) {
+                trip += m.getDistance(tour[i], 0);
+                longest = std::max(longest, trip);
+                if (i < n) trip = m.getDistance(0, tour[i + 1]);
+            } else {
+                trip += m.getDistance(tour[i], tour[i + 1]);
+            }
+        }
+        best = std::min(best, longest);
+    }
+    return best;
+}
+
+void testFleetSplit() {
+    std::cout << "[RUN] testFleetSplit...\n";
+
+    // Two arms around the depot: W-A-B east, W-C-D west, 1 km per road.
+    Graph g;
+    for (const char* id : {"W", "A", "B", "C", "D"}) g.addNode(id, id);
+    g.addEdge("W", "A", 1.0);
+    g.addEdge("A", "B", 1.0);
+    g.addEdge("W", "C", 1.0);
+    g.addEdge("C", "D", 1.0);
+    OptimizationPipelineResult two = Optimizer::runPipeline(g, "W", {"A", "B", "C", "D"}, 2);
+    ASSERT_TRUE(two.success);
+    ASSERT_NEAR(two.optimizedTour.totalDistanceKm, 8.0, 1e-9);
+    ASSERT_EQ(two.fleetOptimized.routes.size(), 2);
+    ASSERT_NEAR(two.fleetOptimized.longestRouteKm, 4.0, 1e-9);
+    ASSERT_NEAR(two.fleetOptimized.totalDistanceKm, 8.0, 1e-9);
+    ASSERT_TRUE(coversEachStopOnce(two.fleetOptimized, two.matrix.size()));
+
+    // A third van cannot shorten the 4 km arm, so it stays at the depot (ties prefer less driving).
+    OptimizationPipelineResult three = Optimizer::runPipeline(g, "W", {"A", "B", "C", "D"}, 3);
+    ASSERT_EQ(three.fleetOptimized.routes.size(), 2);
+    ASSERT_NEAR(three.fleetOptimized.longestRouteKm, 4.0, 1e-9);
+
+    // More vans than stops: one stop per van at most.
+    OptimizationPipelineResult many = Optimizer::runPipeline(g, "W", {"A", "C"}, 5);
+    ASSERT_EQ(many.fleetOptimized.routes.size(), 2);
+    ASSERT_NEAR(many.fleetOptimized.longestRouteKm, 2.0, 1e-9);
+
+    // Single van: no fleet plan is built.
+    OptimizationPipelineResult one = Optimizer::runPipeline(g, "W", {"A", "B"}, 1);
+    ASSERT_TRUE(one.fleetOptimized.routes.empty());
+
+    for (unsigned seed = 1; seed <= 12; ++seed) {
+        RandomInstance inst = makeRandomInstance(seed * 31, 12);
+        for (int k = 2; k <= 4; ++k) {
+            OptimizationPipelineResult res = Optimizer::runPipeline(inst.graph, "W", inst.stops, k);
+            ASSERT_TRUE(res.success);
+            const FleetPlan& base = res.fleetBaseline;
+            const FleetPlan& best = res.fleetOptimized;
+            ASSERT_TRUE(coversEachStopOnce(base, res.matrix.size()));
+            ASSERT_TRUE(coversEachStopOnce(best, res.matrix.size()));
+            ASSERT_EQ(base.routes.size(), static_cast<size_t>(k));
+            ASSERT_TRUE(best.routes.size() <= static_cast<size_t>(k));
+
+            // Never worse than the baseline or a single van; the split beats every cut of the tour.
+            ASSERT_TRUE(best.longestRouteKm <= base.longestRouteKm + 1e-9);
+            ASSERT_TRUE(best.longestRouteKm <= res.optimizedTour.totalDistanceKm + 1e-9);
+            ASSERT_TRUE(best.longestRouteKm <= bruteForceSplitLongest(res.exactTour.tourIndices, res.matrix, k) + 1e-9);
+
+            double total = 0.0;
+            for (const auto& r : best.routes) {
+                ASSERT_NEAR(TwoOpt::computeTourDistance(r.tour, res.matrix), r.distanceKm, 1e-9);
+                ASSERT_FALSE(hasImproving2OptMove(r.tour, res.matrix));
+                total += r.distanceKm;
+            }
+            ASSERT_NEAR(total, best.totalDistanceKm, 1e-9);
+        }
+    }
+
+    // JSON: vehicles is validated and the fleet block appears only for more than one van.
+    const std::string base = R"("warehouse": "W", "stops": ["A", "B", "C", "D"],
+        "nodes": [{"id": "W"}, {"id": "A"}, {"id": "B"}, {"id": "C"}, {"id": "D"}],
+        "roads": [{"source": "W", "target": "A", "distance_km": 1}, {"source": "A", "target": "B", "distance_km": 1},
+                  {"source": "W", "target": "C", "distance_km": 1}, {"source": "C", "target": "D", "distance_km": 1}])";
+    for (const char* bad : {"0", "11", "2.5", "\"2\"", "true"}) {
+        SimpleJson::JsonValue res = runJson("{" + base + R"(, "vehicles": )" + bad + "}");
+        ASSERT_FALSE(res["success"].asBool());
+        ASSERT_TRUE(res["error"].asString().find("'vehicles'") != std::string::npos);
+    }
+    SimpleJson::JsonValue single = runJson("{" + base + "}");
+    ASSERT_TRUE(single["success"].asBool());
+    ASSERT_NEAR(single["vehicles"].asDouble(), 1.0, 1e-9);
+    ASSERT_TRUE(single["fleet"].isNull());
+
+    SimpleJson::JsonValue fleet = runJson("{" + base + R"(, "vehicles": 2})");
+    ASSERT_TRUE(fleet["success"].asBool());
+    const auto& routes = fleet["fleet"]["optimized"]["routes"].asArray();
+    ASSERT_EQ(routes.size(), 2);
+    ASSERT_NEAR(fleet["fleet"]["optimized"]["longestRoute"].asDouble(), 4.0, 1e-9);
+    ASSERT_TRUE(fleet["fleet"]["baseline"]["longestRoute"].asDouble() >= 4.0 - 1e-9);
+    ASSERT_EQ(routes[0]["route"].asArray().front().asString(), "W");
+    ASSERT_EQ(routes[0]["legs"].asArray().size(), routes[0]["route"].asArray().size() - 1);
+    ASSERT_TRUE(fleet["fleet"]["improvementPercent"].asDouble() >= 0.0);
+}
+
+// =============================================================================
 // Main Test Runner Entry Point
 // =============================================================================
 int main() {
@@ -916,6 +1039,7 @@ int main() {
     testRoadPathsAndEdgeValidation();
     testStrictJsonSchema();
     testJsonParserAndOptimalFields();
+    testFleetSplit();
 
     std::cout << "======================================================================\n";
     std::cout << "TEST RESULTS SUMMARY:\n";

@@ -9,12 +9,13 @@ constexpr int kMaxLocalSearchRounds = 100;
 } // namespace
 
 std::string Optimizer::getEngineVersion() {
-    return "2.0.0";
+    return "2.1.0";
 }
 
 OptimizationPipelineResult Optimizer::runPipeline(const Graph& graph,
                                                   const std::string& warehouseId,
-                                                  const std::vector<std::string>& stopIds) {
+                                                  const std::vector<std::string>& stopIds,
+                                                  int vehicles) {
     auto startTime = std::chrono::high_resolution_clock::now();
     OptimizationPipelineResult pipelineRes;
 
@@ -63,6 +64,17 @@ OptimizationPipelineResult Optimizer::runPipeline(const Graph& graph,
     // Step 5: Exact optimum as ground truth for small instances
     if (matrix.size() - 1 <= static_cast<size_t>(HeldKarp::kMaxStops)) {
         pipelineRes.exactTour = HeldKarp::solve(matrix);
+    }
+
+    // Step 6: Multi-vehicle plan. The NN tour is a candidate too, so the plan is never
+    // worse than the equal-chunks baseline cut from it.
+    pipelineRes.vehicles = vehicles;
+    if (vehicles > 1) {
+        const std::vector<int>& nnTour = pipelineRes.nearestNeighborTour.tourIndices;
+        const std::vector<int>& bestTour =
+            pipelineRes.exactTour.success ? pipelineRes.exactTour.tourIndices : tour;
+        pipelineRes.fleetBaseline = Fleet::chunk(nnTour, matrix, vehicles);
+        pipelineRes.fleetOptimized = Fleet::plan({bestTour, nnTour}, matrix, vehicles);
     }
 
     auto endTime = std::chrono::high_resolution_clock::now();

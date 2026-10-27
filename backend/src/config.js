@@ -26,7 +26,9 @@ const config = {
   limits: {
     maxNodes: positiveInt(process.env.MAX_NODES, 5000),
     maxRoads: positiveInt(process.env.MAX_ROADS, 20000),
-    maxStops: positiveInt(process.env.MAX_STOPS, 100)
+    maxStops: positiveInt(process.env.MAX_STOPS, 100),
+    // Fixed: the engine's own cap (Fleet::kMaxVehicles).
+    maxVehicles: 10
   }
 };
 

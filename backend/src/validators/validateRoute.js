@@ -8,7 +8,8 @@ const config = require('../config');
  *     warehouse: string,
  *     stops: string[],
  *     nodes: [{ id: string, name?: string, lat?: number, lng?: number }],
- *     roads: [{ source: string, target: string, distance_km: number, street_name?: string }]
+ *     roads: [{ source: string, target: string, distance_km: number, street_name?: string }],
+ *     vehicles?: integer in [1, limits.maxVehicles], default 1
  *   }
  *
  * Returns { isValid: true, normalizedPayload } or { isValid: false, error }.
@@ -124,13 +125,20 @@ function validateOptimizeInput(body, limits = config.limits) {
     normalizedStops.push(stopId);
   }
 
+  // 5. Vehicles
+  const vehicles = body.vehicles ?? 1;
+  if (!Number.isInteger(vehicles) || vehicles < 1 || vehicles > limits.maxVehicles) {
+    return fail(`'vehicles' must be an integer from 1 to ${limits.maxVehicles}`);
+  }
+
   return {
     isValid: true,
     normalizedPayload: {
       warehouse: warehouseId,
       stops: normalizedStops,
       nodes: normalizedNodes,
-      roads: normalizedRoads
+      roads: normalizedRoads,
+      vehicles
     }
   };
 }

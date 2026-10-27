@@ -8,6 +8,7 @@
 #include "TwoOpt.h"
 #include "OrOpt.h"
 #include "HeldKarp.h"
+#include "Fleet.h"
 #include "RouteUtils.h"
 
 #include <string>
@@ -29,6 +30,10 @@ struct OptimizationPipelineResult {
     int orOptMoves{0};
     TourResult exactTour;             // Held-Karp optimum; success == false when skipped (too many stops)
 
+    int vehicles{1};
+    FleetPlan fleetBaseline;          // vehicles > 1: NN tour cut into equal chunks
+    FleetPlan fleetOptimized;         // vehicles > 1: route-first cluster-second split
+
     double totalPipelineExecutionTimeMicroseconds{0.0};
 };
 
@@ -43,10 +48,12 @@ public:
      * 3. Improves it with 2-Opt local search (warehouse fixed at both ends).
      * 4. Alternates Or-opt and 2-Opt until neither finds an improving move.
      * 5. Solves the exact optimum with Held-Karp when stops <= HeldKarp::kMaxStops.
+     * 6. With vehicles > 1, splits the best tour into per-van routes (see Fleet).
      */
     static OptimizationPipelineResult runPipeline(const Graph& graph,
                                                   const std::string& warehouseId,
-                                                  const std::vector<std::string>& stopIds);
+                                                  const std::vector<std::string>& stopIds,
+                                                  int vehicles = 1);
 };
 
 } // namespace DeliveryOptimizer

@@ -92,6 +92,33 @@ describe('POST /api/optimize — engine results', () => {
     assert.deepEqual(res.body.stages.map((s) => s.distanceKm), [5.45, 5.1, 5.1]);
   });
 
+  it('splits stops across vans and reports the fleet plan against the baseline', async () => {
+    const sampleInput = JSON.parse(
+      fs.readFileSync(path.resolve(__dirname, '../../data/sample-input.json'), 'utf8')
+    );
+    const single = await post(sampleInput);
+    assert.equal(single.body.vehicles, 1);
+    assert.equal(single.body.fleet, null);
+
+    const res = await post({ ...sampleInput, vehicles: 2 });
+    assert.equal(res.status, 200);
+    assert.equal(res.body.vehicles, 2);
+    const { baseline, optimized, improvementPercent } = res.body.fleet;
+    assert.ok(optimized.routes.length >= 1 && optimized.routes.length <= 2);
+    assert.ok(optimized.longestRoute <= baseline.longestRoute);
+    assert.ok(improvementPercent >= 0);
+
+    // Every stop is delivered by exactly one van; every van starts and ends at the depot.
+    const served = optimized.routes.flatMap((r) => r.route.slice(1, -1)).sort();
+    assert.deepEqual(served, [...sampleInput.stops].sort());
+    for (const r of optimized.routes) {
+      assert.equal(r.route[0], 'node_0');
+      assert.equal(r.route.at(-1), 'node_0');
+      assert.equal(r.legs.length, r.route.length - 1);
+      assert.ok(r.fullCoordinates.length >= r.route.length);
+    }
+  });
+
   it('maps an unreachable stop reported by C++ to 400 ALGORITHM_ERROR', async () => {
     const res = await post({
       warehouse: 'W',
@@ -160,6 +187,12 @@ describe('POST /api/optimize — validation', () => {
       { ...twoNodeGraph(), nodes: [{ id: 'node_0', lat: 91, lng: 0 }, { id: 'node_1' }] },
       "'lat'"
     ));
+
+  it('rejects a vehicle count that is not an integer from 1 to the limit', async () => {
+    for (const vehicles of [0, config.limits.maxVehicles + 1, 1.5, '2']) {
+      await expectValidationError({ ...twoNodeGraph(), vehicles }, 'vehicles');
+    }
+  });
 
   it('enforces the stop count limit', () =>
     expectValidationError(

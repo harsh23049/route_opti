@@ -1,6 +1,7 @@
 {
   "distanceSaved": 0.35,
-  "executionTimeMs": 0.4424,
+  "executionTimeMs": 0.2678,
+  "fleet": null,
   "fullCoordinates": [
     [37.783, -122.408],
     [37.788, -122.403],
@@ -257,5 +258,6 @@
       "distanceKm": 5.1
     }
   ],
-  "success": true
+  "success": true,
+  "vehicles": 1
 }

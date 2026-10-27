@@ -10,7 +10,8 @@ class JsonInterface {
 public:
     /**
      * Processes a JSON input string, runs graph construction, Dijkstra, Nearest Neighbor,
-     * 2-Opt, Or-opt and (for small inputs) Held-Karp, and returns a formatted JSON response.
+     * 2-Opt, Or-opt, (for small inputs) Held-Karp and, with "vehicles" > 1, the multi-van split,
+     * and returns a formatted JSON response.
      * Diagnostic logs and errors are emitted to std::cerr.
      * When `ok` is given, it is set to whether the response has "success": true.
      */
