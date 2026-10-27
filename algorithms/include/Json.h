@@ -41,8 +41,10 @@ public:
     bool asBool(bool def = false) const { return isBool() ? boolVal_ : def; }
     double asDouble(double def = 0.0) const { return isNumber() ? numVal_ : def; }
     int asInt(int def = 0) const { return isNumber() ? static_cast<int>(numVal_) : def; }
-    const std::string& asString(const std::string& def = "") const {
-        return isString() ? strVal_ : def;
+    // Returns a reference that outlives the call (a defaulted parameter would dangle).
+    const std::string& asString() const {
+        static const std::string empty;
+        return isString() ? strVal_ : empty;
     }
     const std::vector<JsonValue>& asArray() const { return arrVal_; }
     const std::map<std::string, JsonValue>& asObject() const { return objVal_; }

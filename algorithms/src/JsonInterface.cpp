@@ -8,246 +8,224 @@ namespace DeliveryOptimizer {
 
 namespace {
 
-SimpleJson::JsonValue makeErrorResponse(const std::string& errorMsg) {
-    std::cerr << "[JsonInterface Error] " << errorMsg << "\n";
-    SimpleJson::JsonValue res;
-    res["success"] = false;
-    res["error"] = errorMsg;
-    return res;
+using SimpleJson::JsonValue;
+
+// Leg-by-leg geometry for one tour, emitted under three keys per route variant.
+struct RouteGeometry {
+    JsonValue legs;
+    JsonValue fullRoadPath;
+    JsonValue fullCoordinates;
+};
+
+JsonValue coordinateOf(const Graph& graph, const std::string& nodeId) {
+    JsonValue pair;
+    const Node* node = graph.getNode(nodeId);
+    pair.push_back(node ? node->lat : 0.0);
+    pair.push_back(node ? node->lng : 0.0);
+    return pair;
+}
+
+JsonValue toJsonArray(const std::vector<std::string>& items) {
+    JsonValue arr(std::vector<JsonValue>{});
+    for (const auto& item : items) arr.push_back(item);
+    return arr;
+}
+
+RouteGeometry buildGeometry(const Graph& graph, const DistanceMatrix& matrix,
+                            const std::vector<std::string>& tour) {
+    RouteGeometry geo;
+    geo.legs = JsonValue(std::vector<JsonValue>{});
+    for (size_t i = 0; i + 1 < tour.size(); ++i) {
+        const std::string& u = tour[i];
+        const std::string& v = tour[i + 1];
+
+        JsonValue leg;
+        leg["from"] = u;
+        leg["to"] = v;
+        leg["distanceKm"] = matrix.getDistance(u, v);
+
+        const std::vector<std::string> pathNodes = matrix.getRoadPath(u, v);
+        JsonValue coords(std::vector<JsonValue>{});
+        for (const auto& nodeId : pathNodes) coords.push_back(coordinateOf(graph, nodeId));
+        leg["pathNodes"] = toJsonArray(pathNodes);
+        leg["coordinates"] = coords;
+        geo.legs.push_back(leg);
+    }
+
+    const std::vector<std::string> fullPath = RouteUtils::expandToFullRoadPath(tour, matrix);
+    geo.fullRoadPath = toJsonArray(fullPath);
+    geo.fullCoordinates = JsonValue(std::vector<JsonValue>{});
+    for (const auto& nodeId : fullPath) geo.fullCoordinates.push_back(coordinateOf(graph, nodeId));
+    return geo;
+}
+
+std::string fieldError(const std::string& what, size_t index, const std::string& problem) {
+    return what + " at index " + std::to_string(index) + " " + problem;
 }
 
 } // namespace
 
-std::string JsonInterface::processJson(const std::string& inputJson) {
+std::string JsonInterface::errorJson(const std::string& message) {
+    std::cerr << "[JsonInterface Error] " << message << "\n";
+    JsonValue res;
+    res["success"] = false;
+    res["error"] = message;
+    return res.serialize();
+}
+
+std::string JsonInterface::processJson(const std::string& inputJson, bool* ok) {
     auto startTime = std::chrono::high_resolution_clock::now();
+    if (ok) *ok = false;
 
     std::string parseErr;
-    SimpleJson::JsonValue root = SimpleJson::JsonValue::parse(inputJson, parseErr);
+    JsonValue root = JsonValue::parse(inputJson, parseErr);
 
     if (!parseErr.empty() || !root.isObject()) {
-        return makeErrorResponse("Malformed JSON input: " + (parseErr.empty() ? "Expected root JSON object" : parseErr)).serialize();
+        return errorJson("Malformed JSON input: " + (parseErr.empty() ? "Expected root JSON object" : parseErr));
     }
 
-    // 1. Parse Nodes
-    if (!root.has("nodes") || !root["nodes"].isArray()) {
-        return makeErrorResponse("Missing or invalid 'nodes' array in JSON input").serialize();
+    // 1. Parse Nodes: [{ "id": string, "name"?: string, "lat"?: number, "lng"?: number }]
+    if (!root["nodes"].isArray() || root["nodes"].asArray().empty()) {
+        return errorJson("'nodes' must be a non-empty array");
     }
 
     Graph graph;
-    std::map<std::string, std::pair<double, double>> nodeCoords;
-
     const auto& nodesArr = root["nodes"].asArray();
-    if (nodesArr.empty()) {
-        return makeErrorResponse("Input 'nodes' array cannot be empty").serialize();
-    }
-
     for (size_t i = 0; i < nodesArr.size(); ++i) {
         const auto& nVal = nodesArr[i];
-        if (!nVal.isObject() || !nVal.has("id")) {
-            return makeErrorResponse("Node at index " + std::to_string(i) + " is missing required 'id' field").serialize();
+        if (!nVal["id"].isString()) {
+            return errorJson(fieldError("Node", i, "must have a string 'id'"));
         }
-        std::string id = nVal["id"].asString();
-        std::string name = nVal.has("name") ? nVal["name"].asString() : id;
-        double lat = nVal.has("lat") ? nVal["lat"].asDouble() : 0.0;
-        double lng = nVal.has("lng") ? nVal["lng"].asDouble() : 0.0;
-
+        const std::string& id = nVal["id"].asString();
         try {
-            graph.addNode(id, name, lat, lng);
-            nodeCoords[id] = {lat, lng};
+            graph.addNode(id, nVal["name"].asString(), nVal["lat"].asDouble(), nVal["lng"].asDouble());
         } catch (const std::exception& ex) {
-            return makeErrorResponse(std::string("Failed adding node '") + id + "': " + ex.what()).serialize();
+            return errorJson("Failed adding node '" + id + "': " + ex.what());
         }
     }
 
-    // 2. Parse Roads / Edges
-    if (!root.has("roads") || !root["roads"].isArray()) {
-        return makeErrorResponse("Missing or invalid 'roads' array in JSON input").serialize();
+    // 2. Parse Roads: [{ "source": string, "target": string, "distance_km": number, "street_name"?: string }]
+    if (!root["roads"].isArray()) {
+        return errorJson("'roads' must be an array");
     }
 
     const auto& roadsArr = root["roads"].asArray();
     for (size_t i = 0; i < roadsArr.size(); ++i) {
         const auto& rVal = roadsArr[i];
-        if (!rVal.isObject() || !rVal.has("source") || !rVal.has("target")) {
-            return makeErrorResponse("Road at index " + std::to_string(i) + " is missing 'source' or 'target'").serialize();
+        if (!rVal["source"].isString() || !rVal["target"].isString()) {
+            return errorJson(fieldError("Road", i, "must have string 'source' and 'target'"));
+        }
+        // A missing distance must not silently become a free 0 km road.
+        if (!rVal["distance_km"].isNumber()) {
+            return errorJson(fieldError("Road", i, "must have a numeric 'distance_km'"));
         }
 
-        std::string src = rVal["source"].asString();
-        std::string tgt = rVal["target"].asString();
-        double dist = 0.0;
-        if (rVal.has("distance_km")) {
-            dist = rVal["distance_km"].asDouble();
-        } else if (rVal.has("distance")) {
-            dist = rVal["distance"].asDouble();
-        } else if (rVal.has("weight")) {
-            dist = rVal["weight"].asDouble();
-        }
-
-        std::string streetName = rVal.has("street_name") ? rVal["street_name"].asString() : "";
-
+        const std::string& src = rVal["source"].asString();
+        const std::string& tgt = rVal["target"].asString();
         try {
-            graph.addEdge(src, tgt, dist, streetName);
+            graph.addEdge(src, tgt, rVal["distance_km"].asDouble(), rVal["street_name"].asString());
         } catch (const std::exception& ex) {
-            return makeErrorResponse(std::string("Invalid road between '") + src + "' and '" + tgt + "': " + ex.what()).serialize();
+            return errorJson("Invalid road between '" + src + "' and '" + tgt + "': " + ex.what());
         }
     }
 
-    // 3. Extract Warehouse Node ID
-    std::string warehouseId;
-    if (root.has("warehouse") && root["warehouse"].isString()) {
-        warehouseId = root["warehouse"].asString();
-    } else if (root.has("warehouseId") && root["warehouseId"].isString()) {
-        warehouseId = root["warehouseId"].asString();
-    } else if (root.has("depot")) {
-        if (root["depot"].isString()) {
-            warehouseId = root["depot"].asString();
-        } else if (root["depot"].isObject() && root["depot"].has("id")) {
-            warehouseId = root["depot"]["id"].asString();
-        }
+    // 3. Warehouse node ID
+    if (!root["warehouse"].isString() || root["warehouse"].asString().empty()) {
+        return errorJson("'warehouse' must be a non-empty node ID string");
     }
+    const std::string& warehouseId = root["warehouse"].asString();
 
-    if (warehouseId.empty()) {
-        return makeErrorResponse("Missing required 'warehouse' or 'warehouseId' or 'depot' in input JSON").serialize();
+    // 4. Delivery stops: [string]
+    if (!root["stops"].isArray()) {
+        return errorJson("'stops' must be an array of node ID strings");
     }
-
-    if (!graph.hasNode(warehouseId)) {
-        return makeErrorResponse("Specified warehouse '" + warehouseId + "' does not exist in graph nodes").serialize();
-    }
-
-    // 4. Extract Required Delivery Stops
     std::vector<std::string> stops;
-    if (root.has("stops") && root["stops"].isArray()) {
-        for (const auto& item : root["stops"].asArray()) {
-            if (item.isString()) stops.push_back(item.asString());
-            else if (item.isObject() && item.has("id")) stops.push_back(item["id"].asString());
-            else if (item.isObject() && item.has("nodeId")) stops.push_back(item["nodeId"].asString());
+    const auto& stopsArr = root["stops"].asArray();
+    for (size_t i = 0; i < stopsArr.size(); ++i) {
+        if (!stopsArr[i].isString()) {
+            return errorJson(fieldError("Stop", i, "must be a node ID string"));
         }
-    } else if (root.has("deliveryStops") && root["deliveryStops"].isArray()) {
-        for (const auto& item : root["deliveryStops"].asArray()) {
-            if (item.isString()) stops.push_back(item.asString());
-            else if (item.isObject() && item.has("nodeId")) stops.push_back(item["nodeId"].asString());
-            else if (item.isObject() && item.has("id")) stops.push_back(item["id"].asString());
-        }
-    } else if (root.has("sampleDeliveryStops") && root["sampleDeliveryStops"].isArray()) {
-        for (const auto& item : root["sampleDeliveryStops"].asArray()) {
-            if (item.isString()) stops.push_back(item.asString());
-            else if (item.isObject() && item.has("nodeId")) stops.push_back(item["nodeId"].asString());
-            else if (item.isObject() && item.has("id")) stops.push_back(item["id"].asString());
-        }
+        stops.push_back(stopsArr[i].asString());
     }
 
     // 5. Run Core Optimization Pipeline
     OptimizationPipelineResult pipeline = Optimizer::runPipeline(graph, warehouseId, stops);
     if (!pipeline.success) {
-        return makeErrorResponse(pipeline.errorMessage).serialize();
+        return errorJson(pipeline.errorMessage);
+    }
+
+    const DistanceMatrix& matrix = pipeline.matrix;
+    const TourResult& initial = pipeline.nearestNeighborTour;
+    const TourResult& optimized = pipeline.optimizedTour;
+    const TourResult& exact = pipeline.exactTour;
+
+    // 6. Assemble Output JSON
+    JsonValue response;
+    response["success"] = true;
+
+    double saved = initial.totalDistanceKm - optimized.totalDistanceKm;
+    if (saved < 0.0) saved = 0.0;
+    response["initialRoute"] = toJsonArray(initial.tour);
+    response["optimizedRoute"] = toJsonArray(optimized.tour);
+    response["initialDistance"] = initial.totalDistanceKm;
+    response["optimizedDistance"] = optimized.totalDistanceKm;
+    response["distanceSaved"] = saved;
+    response["improvementPercent"] =
+        initial.totalDistanceKm > 0.0 ? saved / initial.totalDistanceKm * 100.0 : 0.0;
+
+    JsonValue stages(std::vector<JsonValue>{});
+    auto addStage = [&stages](const std::string& name, double distanceKm) {
+        JsonValue stage;
+        stage["algorithm"] = name;
+        stage["distanceKm"] = distanceKm;
+        stages.push_back(stage);
+    };
+    addStage("Nearest Neighbor", initial.totalDistanceKm);
+    addStage("2-Opt", pipeline.twoOptTour.optimizedDistanceKm);
+    addStage("Or-opt", optimized.totalDistanceKm);
+    response["stages"] = stages;
+
+    RouteGeometry optimizedGeo = buildGeometry(graph, matrix, optimized.tour);
+    response["legs"] = optimizedGeo.legs;
+    response["fullRoadPath"] = optimizedGeo.fullRoadPath;
+    response["fullCoordinates"] = optimizedGeo.fullCoordinates;
+
+    RouteGeometry initialGeo = buildGeometry(graph, matrix, initial.tour);
+    response["initialLegs"] = initialGeo.legs;
+    response["initialFullRoadPath"] = initialGeo.fullRoadPath;
+    response["initialFullCoordinates"] = initialGeo.fullCoordinates;
+
+    // Exact optimum (null when the instance is too large for Held-Karp)
+    if (exact.success) {
+        const double optimal = exact.totalDistanceKm;
+        // Equal tours summed in a different order differ by ~1e-15; report those as 0.
+        const double excess = optimized.totalDistanceKm - optimal;
+        RouteGeometry optimalGeo = buildGeometry(graph, matrix, exact.tour);
+        response["optimalRoute"] = toJsonArray(exact.tour);
+        response["optimalDistance"] = optimal;
+        response["optimalityGapPercent"] = (optimal > 0.0 && excess > 1e-9) ? excess / optimal * 100.0 : 0.0;
+        response["optimalLegs"] = optimalGeo.legs;
+        response["optimalFullRoadPath"] = optimalGeo.fullRoadPath;
+        response["optimalFullCoordinates"] = optimalGeo.fullCoordinates;
+    } else {
+        for (const char* key : {"optimalRoute", "optimalDistance", "optimalityGapPercent",
+                                "optimalLegs", "optimalFullRoadPath", "optimalFullCoordinates"}) {
+            response[key] = JsonValue();
+        }
     }
 
     auto endTime = std::chrono::high_resolution_clock::now();
-    double totalExecutionTimeMs =
+    const double totalExecutionTimeMs =
         std::chrono::duration<double, std::milli>(endTime - startTime).count();
-
-    // 6. Assemble Valid Output JSON
-    SimpleJson::JsonValue response;
-    response["success"] = true;
-
-    // Required schema fields:
-    // initialRoute, optimizedRoute, initialDistance, optimizedDistance,
-    // distanceSaved, improvementPercent, and executionTimeMs
-    SimpleJson::JsonValue initRouteArr;
-    for (const auto& stop : pipeline.nearestNeighborTour.tour) {
-        initRouteArr.push_back(stop);
-    }
-    response["initialRoute"] = initRouteArr;
-
-    SimpleJson::JsonValue optRouteArr;
-    for (const auto& stop : pipeline.twoOptTour.optimizedTour) {
-        optRouteArr.push_back(stop);
-    }
-    response["optimizedRoute"] = optRouteArr;
-
-    response["initialDistance"] = pipeline.twoOptTour.initialDistanceKm;
-    response["optimizedDistance"] = pipeline.twoOptTour.optimizedDistanceKm;
-    response["distanceSaved"] = pipeline.twoOptTour.distanceSavedKm;
-    response["improvementPercent"] = pipeline.twoOptTour.percentageImprovement;
     response["executionTimeMs"] = totalExecutionTimeMs;
-
-    // Helper lambda to construct leg geometries and full coordinate sequences
-    auto buildLegsAndCoords = [&](const std::vector<std::string>& tour,
-                                  const std::vector<std::string>& fullRoadPath,
-                                  SimpleJson::JsonValue& outLegs,
-                                  SimpleJson::JsonValue& outFullPath,
-                                  SimpleJson::JsonValue& outFullCoords) {
-        for (size_t i = 0; i < tour.size() - 1; ++i) {
-            const std::string& u = tour[i];
-            const std::string& v = tour[i + 1];
-
-            SimpleJson::JsonValue legObj;
-            legObj["from"] = u;
-            legObj["to"] = v;
-            legObj["distanceKm"] = pipeline.matrix.getDistance(u, v);
-
-            const auto& pathNodes = pipeline.matrix.getRoadPath(u, v);
-            SimpleJson::JsonValue nodesArrVal;
-            SimpleJson::JsonValue coordsArrVal;
-
-            for (const auto& nodeId : pathNodes) {
-                nodesArrVal.push_back(nodeId);
-                auto it = nodeCoords.find(nodeId);
-                if (it != nodeCoords.end()) {
-                    SimpleJson::JsonValue coordPair;
-                    coordPair.push_back(it->second.first);  // lat
-                    coordPair.push_back(it->second.second); // lng
-                    coordsArrVal.push_back(coordPair);
-                }
-            }
-            legObj["pathNodes"] = nodesArrVal;
-            legObj["coordinates"] = coordsArrVal;
-
-            outLegs.push_back(legObj);
-        }
-
-        for (const auto& nodeId : fullRoadPath) {
-            outFullPath.push_back(nodeId);
-            auto it = nodeCoords.find(nodeId);
-            if (it != nodeCoords.end()) {
-                SimpleJson::JsonValue coordPair;
-                coordPair.push_back(it->second.first);  // lat
-                coordPair.push_back(it->second.second); // lng
-                outFullCoords.push_back(coordPair);
-            }
-        }
-    };
-
-    // 2-Opt Optimized Route Geometries (primary)
-    SimpleJson::JsonValue legsArr;
-    SimpleJson::JsonValue fullPathArr;
-    SimpleJson::JsonValue fullCoordsArr;
-    buildLegsAndCoords(pipeline.twoOptTour.optimizedTour,
-                       pipeline.optimizedFullRoadPath,
-                       legsArr, fullPathArr, fullCoordsArr);
-
-    response["legs"] = legsArr;
-    response["fullRoadPath"] = fullPathArr;
-    response["fullCoordinates"] = fullCoordsArr;
-
-    // Nearest Neighbor Initial Route Geometries (for comparative map visualization)
-    SimpleJson::JsonValue initLegsArr;
-    SimpleJson::JsonValue initFullPathArr;
-    SimpleJson::JsonValue initFullCoordsArr;
-    buildLegsAndCoords(pipeline.nearestNeighborTour.tour,
-                       pipeline.initialFullRoadPath,
-                       initLegsArr, initFullPathArr, initFullCoordsArr);
-
-    response["initialLegs"] = initLegsArr;
-    response["initialFullRoadPath"] = initFullPathArr;
-    response["initialFullCoordinates"] = initFullCoordsArr;
 
     // Diagnostics / Summary to stderr
     std::cerr << "[JsonInterface] Processed route successfully: "
-              << pipeline.twoOptTour.initialDistanceKm << " km -> "
-              << pipeline.twoOptTour.optimizedDistanceKm << " km (-"
-              << pipeline.twoOptTour.percentageImprovement << "%) in "
+              << initial.totalDistanceKm << " km -> "
+              << optimized.totalDistanceKm << " km in "
               << totalExecutionTimeMs << " ms\n";
 
+    if (ok) *ok = true;
     return response.serialize(2);
 }
 

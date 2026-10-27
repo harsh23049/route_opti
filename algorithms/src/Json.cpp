@@ -1,5 +1,6 @@
 #include "Json.h"
 #include <cctype>
+#include <cmath>
 #include <iomanip>
 
 namespace SimpleJson {
@@ -11,6 +12,7 @@ public:
     Parser(const std::string& src) : src_(src), pos_(0) {}
 
     JsonValue parse(std::string& err) {
+        err.clear();
         skipWhitespace();
         if (pos_ >= src_.size()) {
             err = "Empty JSON payload";
@@ -25,15 +27,25 @@ public:
                 return JsonValue();
             }
             return v;
-        } catch (const std::runtime_error& ex) {
+        } catch (const std::exception& ex) {
             err = ex.what();
             return JsonValue();
         }
     }
 
 private:
+    // Bounds recursion so hostile input like "[[[[..." cannot overflow the stack.
+    static constexpr int kMaxDepth = 256;
+
     const std::string& src_;
     size_t pos_{0};
+    int depth_{0};
+
+    void enter() {
+        if (++depth_ > kMaxDepth) {
+            throw std::runtime_error("JSON nesting deeper than " + std::to_string(kMaxDepth) + " levels");
+        }
+    }
 
     void skipWhitespace() {
         while (pos_ < src_.size()) {
@@ -73,11 +85,13 @@ private:
 
     JsonValue parseObject() {
         get(); // consume '{'
+        enter();
         std::map<std::string, JsonValue> obj;
         skipWhitespace();
 
         if (peek() == '}') {
             get();
+            --depth_;
             return JsonValue(obj);
         }
 
@@ -104,16 +118,19 @@ private:
                 throw std::runtime_error("Expected ',' or '}' in object at position " + std::to_string(pos_));
             }
         }
+        --depth_;
         return JsonValue(obj);
     }
 
     JsonValue parseArray() {
         get(); // consume '['
+        enter();
         std::vector<JsonValue> arr;
         skipWhitespace();
 
         if (peek() == ']') {
             get();
+            --depth_;
             return JsonValue(arr);
         }
 
@@ -128,6 +145,7 @@ private:
                 throw std::runtime_error("Expected ',' or ']' in array at position " + std::to_string(pos_));
             }
         }
+        --depth_;
         return JsonValue(arr);
     }
 
@@ -154,11 +172,22 @@ private:
                     case 'r': s += '\r'; break;
                     case 't': s += '\t'; break;
                     case 'u': {
-                        // 4 hex digits (skip or basic ascii support)
-                        if (pos_ + 4 <= src_.size()) {
-                            pos_ += 4;
-                            s += '?';
+                        unsigned int cp = parseHex4();
+                        // Combine a UTF-16 surrogate pair into one code point
+                        if (cp >= 0xD800 && cp <= 0xDBFF) {
+                            if (src_.compare(pos_, 2, "\\u") != 0) {
+                                throw std::runtime_error("Unpaired UTF-16 surrogate in string");
+                            }
+                            pos_ += 2;
+                            unsigned int low = parseHex4();
+                            if (low < 0xDC00 || low > 0xDFFF) {
+                                throw std::runtime_error("Invalid UTF-16 low surrogate in string");
+                            }
+                            cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00);
+                        } else if (cp >= 0xDC00 && cp <= 0xDFFF) {
+                            throw std::runtime_error("Unpaired UTF-16 surrogate in string");
                         }
+                        appendUtf8(s, cp);
                         break;
                     }
                     default: s += esc; break;
@@ -168,6 +197,40 @@ private:
             }
         }
         throw std::runtime_error("Unterminated string literal");
+    }
+
+    unsigned int parseHex4() {
+        if (pos_ + 4 > src_.size()) {
+            throw std::runtime_error("Truncated \\u escape in string");
+        }
+        unsigned int value = 0;
+        for (int i = 0; i < 4; ++i) {
+            char c = src_[pos_++];
+            value <<= 4;
+            if (c >= '0' && c <= '9') value |= static_cast<unsigned int>(c - '0');
+            else if (c >= 'a' && c <= 'f') value |= static_cast<unsigned int>(c - 'a' + 10);
+            else if (c >= 'A' && c <= 'F') value |= static_cast<unsigned int>(c - 'A' + 10);
+            else throw std::runtime_error("Invalid hex digit in \\u escape");
+        }
+        return value;
+    }
+
+    static void appendUtf8(std::string& out, unsigned int cp) {
+        if (cp < 0x80) {
+            out += static_cast<char>(cp);
+        } else if (cp < 0x800) {
+            out += static_cast<char>(0xC0 | (cp >> 6));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else if (cp < 0x10000) {
+            out += static_cast<char>(0xE0 | (cp >> 12));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        } else {
+            out += static_cast<char>(0xF0 | (cp >> 18));
+            out += static_cast<char>(0x80 | ((cp >> 12) & 0x3F));
+            out += static_cast<char>(0x80 | ((cp >> 6) & 0x3F));
+            out += static_cast<char>(0x80 | (cp & 0x3F));
+        }
     }
 
     JsonValue parseNumber() {
@@ -190,8 +253,14 @@ private:
             }
         }
         std::string numStr = src_.substr(start, pos_ - start);
-        double val = std::stod(numStr);
-        return JsonValue(val);
+        if (numStr.empty() || numStr == "-") {
+            throw std::runtime_error("Invalid number at position " + std::to_string(start));
+        }
+        try {
+            return JsonValue(std::stod(numStr));
+        } catch (const std::out_of_range&) {
+            throw std::runtime_error("Number out of range at position " + std::to_string(start));
+        }
     }
 
     JsonValue parseBool() {
@@ -253,7 +322,10 @@ void JsonValue::serializeInternal(std::ostream& os, int currentIndent, int inden
         case JsonType::Null: os << "null"; break;
         case JsonType::Bool: os << (boolVal_ ? "true" : "false"); break;
         case JsonType::Number: {
-            if (numVal_ == static_cast<long long>(numVal_)) {
+            // JSON has no NaN/Infinity; the cast guard avoids UB for huge magnitudes.
+            if (!std::isfinite(numVal_)) {
+                os << "null";
+            } else if (std::abs(numVal_) < 1e15 && numVal_ == static_cast<long long>(numVal_)) {
                 os << static_cast<long long>(numVal_);
             } else {
                 os << std::setprecision(12) << numVal_;

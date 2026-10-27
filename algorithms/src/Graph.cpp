@@ -1,4 +1,5 @@
 #include "Graph.h"
+#include <cmath>
 
 namespace DeliveryOptimizer {
 
@@ -32,9 +33,9 @@ void Graph::addEdge(const std::string& uId,
                     const std::string& vId,
                     double distanceKm,
                     const std::string& streetName) {
-    // Requirement (1): Non-negative edge distances
-    if (distanceKm < 0.0) {
-        throw std::invalid_argument("Edge distance cannot be negative: " + std::to_string(distanceKm));
+    // Requirement (1): Non-negative, finite edge distances (NaN/Inf would poison Dijkstra)
+    if (!std::isfinite(distanceKm) || distanceKm < 0.0) {
+        throw std::invalid_argument("Edge distance must be a finite non-negative number: " + std::to_string(distanceKm));
     }
 
     auto itU = idToIndex_.find(uId);

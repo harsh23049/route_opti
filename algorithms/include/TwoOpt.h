@@ -42,9 +42,10 @@ struct TwoOptResult {
  *   undirected road network for O(1) delta-cost evaluation per pair.
  * 
  * Time Complexity:
- * - O(N^2) per iteration pass over all (i, k) candidate pairs, where N is the number of stops.
- *   In practice, runs in a few iterations for typical delivery routes.
- * 
+ * - O(N^2) per pass over all (i, k) candidate pairs, where N is the number of stops.
+ *   Improving moves are applied in place and the pass continues; passes repeat until one
+ *   finds no improving move (a 2-opt local optimum) or maxPasses is reached.
+ *
  * Space Complexity:
  * - O(N) auxiliary space to store the tour index array.
  */
@@ -52,7 +53,13 @@ class TwoOpt {
 public:
     static TwoOptResult optimize(const TourResult& initialTour,
                                  const DistanceMatrix& matrix,
-                                 int maxIterations = 1000);
+                                 int maxPasses = 1000);
+
+    /**
+     * Runs 2-opt passes on a closed tour [0, ..., 0] in place.
+     * Returns the number of improving moves applied.
+     */
+    static int improve(std::vector<int>& tour, const DistanceMatrix& matrix, int maxPasses = 1000);
 
     /**
      * Calculates the exact total distance of a tour sequence from the distance matrix.

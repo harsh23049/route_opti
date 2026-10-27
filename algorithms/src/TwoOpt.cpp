@@ -4,6 +4,11 @@
 
 namespace DeliveryOptimizer {
 
+namespace {
+// Moves must beat this to count, so floating-point noise cannot cause endless swaps.
+constexpr double kEpsilon = 1e-9;
+} // namespace
+
 double TwoOpt::computeTourDistance(const std::vector<int>& tourIndices,
                                   const DistanceMatrix& matrix) {
     if (tourIndices.size() < 2) return 0.0;
@@ -14,9 +19,50 @@ double TwoOpt::computeTourDistance(const std::vector<int>& tourIndices,
     return dist;
 }
 
+int TwoOpt::improve(std::vector<int>& tour, const DistanceMatrix& matrix, int maxPasses) {
+    const size_t n = tour.size();
+    // A tour of length <= 3 has <= 1 customer stop (e.g., [W, W] or [W, S1, W]).
+    // Subsegment reversal requires at least 2 intermediate customer stops.
+    if (n <= 3) return 0;
+
+    int moves = 0;
+    bool improved = true;
+
+    // Requirement (6): Keep the warehouse fixed at both ends (index 0 and index n - 1).
+    // Candidate subsegments [i, k] range from index 1 to n - 2.
+    for (int pass = 0; improved && pass < maxPasses; ++pass) {
+        improved = false;
+
+        for (size_t i = 1; i < n - 2; ++i) {
+            for (size_t k = i + 1; k < n - 1; ++k) {
+                // Current edges: (a -> b) and (c -> d). After reversing [i, k]: (a -> c) and (b -> d).
+                // Internal subsegment distances stay the same because the road distance matrix
+                // is symmetric for an undirected graph (dist(x, y) == dist(y, x)).
+                const int a = tour[i - 1];
+                const int b = tour[i];
+                const int c = tour[k];
+                const int d = tour[k + 1];
+
+                const double delta = matrix.getDistance(a, c) + matrix.getDistance(b, d)
+                                   - matrix.getDistance(a, b) - matrix.getDistance(c, d);
+
+                // Apply and keep scanning the updated tour instead of restarting from i = 1;
+                // a pass ends only after every (i, k) pair has been checked.
+                if (delta < -kEpsilon) {
+                    std::reverse(tour.begin() + i, tour.begin() + k + 1);
+                    ++moves;
+                    improved = true;
+                }
+            }
+        }
+    }
+
+    return moves;
+}
+
 TwoOptResult TwoOpt::optimize(const TourResult& initialTour,
                              const DistanceMatrix& matrix,
-                             int maxIterations) {
+                             int maxPasses) {
     auto startTime = std::chrono::high_resolution_clock::now();
 
     TwoOptResult result;
@@ -37,74 +83,8 @@ TwoOptResult TwoOpt::optimize(const TourResult& initialTour,
     }
 
     std::vector<int> tour = initialTour.tourIndices;
-    size_t n = tour.size();
-
-    // A tour of length <= 3 has <= 1 customer stop (e.g., [W, W] or [W, S1, W]).
-    // Subsegment reversal requires at least 2 intermediate customer stops.
-    if (n <= 3) {
-        result.success = true;
-        result.optimizedTour = initialTour.tour;
-        result.optimizedTourIndices = tour;
-        result.optimizedDistanceKm = initialTour.totalDistanceKm;
-        result.distanceSavedKm = 0.0;
-        result.percentageImprovement = 0.0;
-        result.iterations = 0;
-
-        auto endTime = std::chrono::high_resolution_clock::now();
-        result.executionTimeMicroseconds =
-            std::chrono::duration<double, std::micro>(endTime - startTime).count();
-        return result;
-    }
-
-    bool improvementFound = true;
-    int iterationCount = 0;
-
-    // Requirement (6): Keep the warehouse fixed at both ends (index 0 and index n - 1).
-    // Candidate subsegments [i, k] range from index 1 to n - 2.
-    while (improvementFound && iterationCount < maxIterations) {
-        improvementFound = false;
-
-        for (size_t i = 1; i < n - 2; ++i) {
-            for (size_t k = i + 1; k < n - 1; ++k) {
-                int u1 = tour[i - 1];
-                int v1 = tour[i];
-                int u2 = tour[k];
-                int v2 = tour[k + 1];
-
-                // Current edges: (u1 -> v1) and (u2 -> v2)
-                double currentEdgeCost = matrix.getDistance(u1, v1) + matrix.getDistance(u2, v2);
-
-                // Proposed edges after reversing subsegment [i, k]: (u1 -> u2) and (v1 -> v2)
-                // Note: Internal subsegment distances remain invariant because the road distance matrix
-                // is strictly symmetric for an undirected graph (dist(a, b) == dist(b, a)).
-                double proposedEdgeCost = matrix.getDistance(u1, u2) + matrix.getDistance(v1, v2);
-
-                double delta = proposedEdgeCost - currentEdgeCost;
-
-                // Check for strict improvement beyond floating-point epsilon
-                if (delta < -1e-9) {
-                    std::reverse(tour.begin() + i, tour.begin() + k + 1);
-                    improvementFound = true;
-                    iterationCount++;
-                    break; // Restart scan with improved tour
-                }
-            }
-            if (improvementFound) {
-                break;
-            }
-        }
-    }
-
-    // Recompute total optimized tour distance
-    double finalDist = computeTourDistance(tour, matrix);
-
-    // Build node ID tour for display/output
-    const std::vector<std::string>& locIds = matrix.getLocationIds();
-    std::vector<std::string> optimizedIdTour;
-    optimizedIdTour.reserve(tour.size());
-    for (int idx : tour) {
-        optimizedIdTour.push_back(locIds[idx]);
-    }
+    const int moves = improve(tour, matrix, maxPasses);
+    const double finalDist = moves > 0 ? computeTourDistance(tour, matrix) : initialTour.totalDistanceKm;
 
     double saved = initialTour.totalDistanceKm - finalDist;
     if (saved < 0.0) saved = 0.0;
@@ -119,12 +99,12 @@ TwoOptResult TwoOpt::optimize(const TourResult& initialTour,
         std::chrono::duration<double, std::micro>(endTime - startTime).count();
 
     result.success = true;
-    result.optimizedTour = optimizedIdTour;
+    result.optimizedTour = matrix.toIds(tour);
     result.optimizedTourIndices = tour;
     result.optimizedDistanceKm = finalDist;
     result.distanceSavedKm = saved;
     result.percentageImprovement = pct;
-    result.iterations = iterationCount;
+    result.iterations = moves;
 
     return result;
 }

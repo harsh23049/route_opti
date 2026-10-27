@@ -1,6 +1,6 @@
 {
   "warehouse": "node_0",
-  "stops": ["node_1", "node_2", "node_3", "node_4", "node_5"],
+  "stops": ["node_1", "node_2", "node_3", "node_4"],
   "nodes": [
     { "id": "node_0", "name": "Central Logistics Hub", "lat": 37.7830, "lng": -122.4080 },
     { "id": "node_1", "name": "North Market Stop",     "lat": 37.7915, "lng": -122.3990 },

@@ -23,7 +23,6 @@ TourResult NearestNeighbor::solve(const DistanceMatrix& matrix) {
         return result;
     }
 
-    const std::vector<std::string>& locIds = matrix.getLocationIds();
     const std::string& warehouseId = matrix.getWarehouseId();
 
     // Edge case: Only warehouse, 0 delivery stops
@@ -91,19 +90,12 @@ TourResult NearestNeighbor::solve(const DistanceMatrix& matrix) {
     totalDistance += returnDist;
     tourIndices.push_back(0);
 
-    // Build node ID tour
-    std::vector<std::string> idTour;
-    idTour.reserve(tourIndices.size());
-    for (int idx : tourIndices) {
-        idTour.push_back(locIds[idx]);
-    }
-
     auto endTime = std::chrono::high_resolution_clock::now();
     result.executionTimeMicroseconds =
         std::chrono::duration<double, std::micro>(endTime - startTime).count();
 
     result.success = true;
-    result.tour = idTour;
+    result.tour = matrix.toIds(tourIndices);
     result.tourIndices = tourIndices;
     result.totalDistanceKm = totalDistance;
 

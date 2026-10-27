@@ -6,6 +6,8 @@
 #include "DistanceMatrix.h"
 #include "NearestNeighbor.h"
 #include "TwoOpt.h"
+#include "OrOpt.h"
+#include "HeldKarp.h"
 #include "RouteUtils.h"
 
 #include <string>
@@ -21,11 +23,11 @@ struct OptimizationPipelineResult {
     std::string errorMessage{""};
 
     DistanceMatrix matrix;
-    TourResult nearestNeighborTour;
-    TwoOptResult twoOptTour;
-
-    std::vector<std::string> initialFullRoadPath;
-    std::vector<std::string> optimizedFullRoadPath;
+    TourResult nearestNeighborTour;   // Stage 1: greedy construction
+    TwoOptResult twoOptTour;          // Stage 2: NN improved by 2-Opt alone
+    TourResult optimizedTour;         // Stage 3: alternating Or-opt / 2-Opt until neither improves
+    int orOptMoves{0};
+    TourResult exactTour;             // Held-Karp optimum; success == false when skipped (too many stops)
 
     double totalPipelineExecutionTimeMicroseconds{0.0};
 };
@@ -36,11 +38,11 @@ public:
 
     /**
      * Executes the full delivery optimization pipeline:
-     * 1. Validates inputs & graph.
-     * 2. Builds symmetric all-pairs Dijkstra distance matrix.
-     * 3. Solves TSP using Nearest Neighbor heuristic.
-     * 4. Improves the closed loop using 2-Opt local search while fixing the warehouse.
-     * 5. Reconstructs complete turn-by-turn road paths.
+     * 1. Builds the symmetric all-pairs Dijkstra distance matrix (validates IDs and reachability).
+     * 2. Constructs an initial tour with the Nearest Neighbor heuristic.
+     * 3. Improves it with 2-Opt local search (warehouse fixed at both ends).
+     * 4. Alternates Or-opt and 2-Opt until neither finds an improving move.
+     * 5. Solves the exact optimum with Held-Karp when stops <= HeldKarp::kMaxStops.
      */
     static OptimizationPipelineResult runPipeline(const Graph& graph,
                                                   const std::string& warehouseId,

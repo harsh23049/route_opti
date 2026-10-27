@@ -1,9 +1,3 @@
-#include "Graph.h"
-#include "Dijkstra.h"
-#include "DistanceMatrix.h"
-#include "NearestNeighbor.h"
-#include "TwoOpt.h"
-#include "RouteUtils.h"
 #include "Optimizer.h"
 #include "JsonInterface.h"
 
@@ -13,62 +7,26 @@
 #include <iomanip>
 #include <string>
 #include <vector>
-#include <unistd.h>
 
 using namespace DeliveryOptimizer;
 
-void printDemo();
+namespace {
 
-int main(int argc, char* argv[]) {
-    // 1. Check for explicit --demo flag
-    if (argc > 1 && std::string(argv[1]) == "--demo") {
-        printDemo();
-        return 0;
-    }
-
-    std::string jsonInput;
-
-    // 2. Check for --file <filepath> argument
-    if (argc >= 3 && std::string(argv[1]) == "--file") {
-        std::ifstream file(argv[2]);
-        if (!file.is_open()) {
-            std::cerr << "[Error] Cannot open input file: " << argv[2] << "\n";
-            std::cout << "{\n  \"success\": false,\n  \"error\": \"Cannot open input file: "
-                      << argv[2] << "\"\n}\n";
-            return 1;
-        }
-        std::stringstream buffer;
-        buffer << file.rdbuf();
-        jsonInput = buffer.str();
-    } else {
-        // 3. Read from standard input (pipe, redirect, or stdin flag)
-        // If interactive terminal with no piped data and no args, run demo
-        if (isatty(fileno(stdin)) && argc == 1) {
-            std::cerr << "[Notice] No piped input detected. Running built-in demonstration.\n";
-            std::cerr << "[Notice] To supply JSON, use: ./optimizer_engine --file input.json OR pipe via stdin.\n\n";
-            printDemo();
-            return 0;
-        }
-
-        std::stringstream buffer;
-        buffer << std::cin.rdbuf();
-        jsonInput = buffer.str();
-    }
-
-    if (jsonInput.empty()) {
-        std::cerr << "[Error] Empty input payload received.\n";
-        std::cout << "{\n  \"success\": false,\n  \"error\": \"Empty input payload received\"\n}\n";
-        return 1;
-    }
-
-    // Process JSON input and write strictly valid JSON to stdout
-    std::string jsonOutput = JsonInterface::processJson(jsonInput);
-    std::cout << jsonOutput << "\n";
-
-    return 0;
+void printUsage() {
+    std::cerr << "Usage:\n"
+              << "  optimizer_engine < input.json        Read request JSON from stdin\n"
+              << "  optimizer_engine --file input.json   Read request JSON from a file\n"
+              << "  optimizer_engine --demo              Run the built-in demonstration\n"
+              << "  optimizer_engine --version           Print the engine version\n";
 }
 
-// Built-in demonstration run when executed with --demo or in terminal with no stdin
+void printTour(const char* label, const TourResult& tour) {
+    std::cout << "  - " << std::left << std::setw(26) << label << ": ";
+    for (const auto& s : tour.tour) std::cout << s << " ";
+    std::cout << " (" << tour.totalDistanceKm << " km)\n";
+}
+
+// Built-in demonstration run with --demo
 void printDemo() {
     std::cout << std::fixed << std::setprecision(3);
     std::cout << "======================================================================\n";
@@ -100,18 +58,66 @@ void printDemo() {
     cityGraph.addEdge("S4", "J2", 4.20, "Cross-City Tunnel");
 
     OptimizationPipelineResult res = Optimizer::runPipeline(cityGraph, "W", {"S1", "S2", "S3", "S4"});
-    if (res.success) {
-        std::cout << "Pipeline Executed Successfully:\n";
-        std::cout << "  - Initial Tour (NN)    : ";
-        for (const auto& s : res.nearestNeighborTour.tour) std::cout << s << " ";
-        std::cout << " (" << res.nearestNeighborTour.totalDistanceKm << " km)\n";
-
-        std::cout << "  - Optimized Tour (2-Opt): ";
-        for (const auto& s : res.twoOptTour.optimizedTour) std::cout << s << " ";
-        std::cout << " (" << res.twoOptTour.optimizedDistanceKm << " km)\n";
-
-        std::cout << "  - Distance Saved       : " << res.twoOptTour.distanceSavedKm << " km (-"
-                  << res.twoOptTour.percentageImprovement << "%)\n";
-        std::cout << "  - Total Compute Time   : " << res.totalPipelineExecutionTimeMicroseconds << " microseconds\n";
+    if (!res.success) {
+        std::cout << "Pipeline failed: " << res.errorMessage << "\n";
+        return;
     }
+
+    std::cout << "Pipeline Executed Successfully:\n";
+    printTour("Initial Tour (NN)", res.nearestNeighborTour);
+    std::cout << "  - " << std::left << std::setw(26) << "After 2-Opt" << ": "
+              << res.twoOptTour.optimizedDistanceKm << " km\n";
+    printTour("Optimized (2-Opt+Or-opt)", res.optimizedTour);
+    if (res.exactTour.success) printTour("Exact Optimum (Held-Karp)", res.exactTour);
+    std::cout << "  - " << std::left << std::setw(26) << "Total Compute Time" << ": "
+              << res.totalPipelineExecutionTimeMicroseconds << " microseconds\n";
+}
+
+} // namespace
+
+int main(int argc, char* argv[]) {
+    const std::string mode = argc > 1 ? argv[1] : "";
+
+    if (mode == "--demo") {
+        printDemo();
+        return 0;
+    }
+    if (mode == "--version") {
+        std::cout << Optimizer::getEngineVersion() << "\n";
+        return 0;
+    }
+    if (mode == "--help" || mode == "-h") {
+        printUsage();
+        return 0;
+    }
+
+    std::string jsonInput;
+    if (mode == "--file" && argc == 3) {
+        std::ifstream file(argv[2], std::ios::binary);
+        if (!file.is_open()) {
+            std::cout << JsonInterface::errorJson(std::string("Cannot open input file: ") + argv[2]) << "\n";
+            return 1;
+        }
+        std::stringstream buffer;
+        buffer << file.rdbuf();
+        jsonInput = buffer.str();
+    } else if (argc == 1) {
+        // Read from standard input (pipe or redirect) — the IPC path used by the backend.
+        std::stringstream buffer;
+        buffer << std::cin.rdbuf();
+        jsonInput = buffer.str();
+    } else {
+        printUsage();
+        return 2;
+    }
+
+    if (jsonInput.empty()) {
+        std::cout << JsonInterface::errorJson("Empty input payload received") << "\n";
+        return 1;
+    }
+
+    // stdout carries exactly one JSON document; the exit code mirrors its "success" flag.
+    bool ok = false;
+    std::cout << JsonInterface::processJson(jsonInput, &ok) << "\n";
+    return ok ? 0 : 1;
 }

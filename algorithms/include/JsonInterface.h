@@ -9,11 +9,15 @@ namespace DeliveryOptimizer {
 class JsonInterface {
 public:
     /**
-     * Processes a JSON input string, runs graph construction, Dijkstra,
-     * Nearest Neighbor, and 2-Opt, and returns a formatted JSON response string.
+     * Processes a JSON input string, runs graph construction, Dijkstra, Nearest Neighbor,
+     * 2-Opt, Or-opt and (for small inputs) Held-Karp, and returns a formatted JSON response.
      * Diagnostic logs and errors are emitted to std::cerr.
+     * When `ok` is given, it is set to whether the response has "success": true.
      */
-    static std::string processJson(const std::string& inputJson);
+    static std::string processJson(const std::string& inputJson, bool* ok = nullptr);
+
+    /** Serializes {"success": false, "error": message} and logs the message to std::cerr. */
+    static std::string errorJson(const std::string& message);
 };
 
 } // namespace DeliveryOptimizer

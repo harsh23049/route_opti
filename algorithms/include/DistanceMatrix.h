@@ -40,13 +40,15 @@ public:
     const std::vector<std::string>& getLocationIds() const { return locationIds_; }
 
     int getIndex(const std::string& id) const;
+    std::vector<std::string> toIds(const std::vector<int>& indices) const;
     bool hasLocation(const std::string& id) const;
 
     double getDistance(int i, int j) const;
     double getDistance(const std::string& u, const std::string& v) const;
 
-    const std::vector<std::string>& getRoadPath(int i, int j) const;
-    const std::vector<std::string>& getRoadPath(const std::string& u, const std::string& v) const;
+    // Road-level node sequence for leg i -> j, rebuilt on demand from the Dijkstra predecessor tree.
+    std::vector<std::string> getRoadPath(int i, int j) const;
+    std::vector<std::string> getRoadPath(const std::string& u, const std::string& v) const;
 
     /**
      * Verifies that distances[i][j] == distances[j][i] within floating-point tolerance.
@@ -64,8 +66,11 @@ private:
     // M x M symmetric distance matrix
     std::vector<std::vector<double>> distances_;
 
-    // M x M cached full road-level node paths
-    std::vector<std::vector<std::vector<std::string>>> roadPaths_;
+    // M x V Dijkstra predecessor trees (one per location). Paths are rebuilt on demand,
+    // keeping memory at O(M * V) instead of O(M^2 * pathLength).
+    std::vector<std::vector<int>> parents_;
+    std::vector<int> graphIndex_;       // location index -> graph node index
+    std::vector<std::string> nodeIds_;  // graph node index -> node ID
 
     double buildTimeMicroseconds_{0.0};
 };

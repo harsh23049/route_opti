@@ -1,4 +1,5 @@
 #include "DistanceMatrix.h"
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <unordered_set>
@@ -54,33 +55,33 @@ bool DistanceMatrix::build(const Graph& graph,
 
     size_t m = outMatrix.locationIds_.size();
     outMatrix.distances_.assign(m, std::vector<double>(m, 0.0));
-    outMatrix.roadPaths_.assign(m, std::vector<std::vector<std::string>>(m));
+    outMatrix.parents_.resize(m);
+    outMatrix.graphIndex_.resize(m);
+    for (size_t i = 0; i < m; ++i) {
+        outMatrix.graphIndex_[i] = graph.getNodeIndex(outMatrix.locationIds_[i]);
+    }
+    outMatrix.nodeIds_.reserve(graph.getNodeCount());
+    for (const Node& node : graph.getAllNodes()) {
+        outMatrix.nodeIds_.push_back(node.id);
+    }
 
     // 4. Compute Dijkstra shortest paths from each location
     for (size_t i = 0; i < m; ++i) {
-        const std::string& fromId = outMatrix.locationIds_[i];
-        int fromGraphIdx = graph.getNodeIndex(fromId);
-        SingleSourceResult ssr = Dijkstra::computeFromSource(graph, fromGraphIdx);
+        SingleSourceResult ssr = Dijkstra::computeFromSource(graph, outMatrix.graphIndex_[i]);
 
         for (size_t j = 0; j < m; ++j) {
-            if (i == j) {
-                outMatrix.distances_[i][j] = 0.0;
-                outMatrix.roadPaths_[i][j] = {fromId};
-            } else {
-                const std::string& toId = outMatrix.locationIds_[j];
-                int toGraphIdx = graph.getNodeIndex(toId);
+            if (i == j) continue;
+            int toGraphIdx = outMatrix.graphIndex_[j];
 
-                // Requirement (7): Handle unreachable locations
-                if (!ssr.isReachable(toGraphIdx)) {
-                    errorMessage = "Unreachable location detected: no road path exists between '" +
-                                   fromId + "' and '" + toId + "'";
-                    return false;
-                }
-
-                outMatrix.distances_[i][j] = ssr.distances[toGraphIdx];
-                outMatrix.roadPaths_[i][j] = ssr.reconstructPathNodes(graph, toGraphIdx);
+            // Requirement (7): Handle unreachable locations
+            if (!ssr.isReachable(toGraphIdx)) {
+                errorMessage = "Unreachable location detected: no road path exists between '" +
+                               outMatrix.locationIds_[i] + "' and '" + outMatrix.locationIds_[j] + "'";
+                return false;
             }
+            outMatrix.distances_[i][j] = ssr.distances[toGraphIdx];
         }
+        outMatrix.parents_[i] = std::move(ssr.parents);
     }
 
     outMatrix.valid_ = true;
@@ -101,6 +102,15 @@ int DistanceMatrix::getIndex(const std::string& id) const {
         return it->second;
     }
     return -1;
+}
+
+std::vector<std::string> DistanceMatrix::toIds(const std::vector<int>& indices) const {
+    std::vector<std::string> ids;
+    ids.reserve(indices.size());
+    for (int idx : indices) {
+        ids.push_back(locationIds_[idx]);
+    }
+    return ids;
 }
 
 bool DistanceMatrix::hasLocation(const std::string& id) const {
@@ -124,23 +134,25 @@ double DistanceMatrix::getDistance(const std::string& u, const std::string& v) c
     return getDistance(i, j);
 }
 
-const std::vector<std::string>& DistanceMatrix::getRoadPath(int i, int j) const {
-    static const std::vector<std::string> emptyPath;
-    if (i >= 0 && i < static_cast<int>(roadPaths_.size()) &&
-        j >= 0 && j < static_cast<int>(roadPaths_[i].size())) {
-        return roadPaths_[i][j];
+std::vector<std::string> DistanceMatrix::getRoadPath(int i, int j) const {
+    std::vector<std::string> path;
+    const int m = static_cast<int>(parents_.size());
+    if (i < 0 || i >= m || j < 0 || j >= m) {
+        return path;
     }
-    return emptyPath;
+
+    const std::vector<int>& parents = parents_[i];
+    const int source = graphIndex_[i];
+    for (int curr = graphIndex_[j]; curr != -1; curr = parents[curr]) {
+        path.push_back(nodeIds_[curr]);
+        if (curr == source) break;
+    }
+    std::reverse(path.begin(), path.end());
+    return path;
 }
 
-const std::vector<std::string>& DistanceMatrix::getRoadPath(const std::string& u, const std::string& v) const {
-    static const std::vector<std::string> emptyPath;
-    int i = getIndex(u);
-    int j = getIndex(v);
-    if (i == -1 || j == -1) {
-        return emptyPath;
-    }
-    return getRoadPath(i, j);
+std::vector<std::string> DistanceMatrix::getRoadPath(const std::string& u, const std::string& v) const {
+    return getRoadPath(getIndex(u), getIndex(v));
 }
 
 bool DistanceMatrix::isSymmetric(double tolerance) const {

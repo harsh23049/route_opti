@@ -3,6 +3,9 @@
 #include "DistanceMatrix.h"
 #include "NearestNeighbor.h"
 #include "TwoOpt.h"
+#include "OrOpt.h"
+#include "HeldKarp.h"
+#include "Optimizer.h"
 #include "RouteUtils.h"
 #include "Json.h"
 #include "JsonInterface.h"
@@ -14,9 +17,11 @@
 #include <algorithm>
 #include <numeric>
 #include <cmath>
+#include <limits>
+#include <random>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
-#include <cassert>
 
 using namespace DeliveryOptimizer;
 
@@ -584,6 +589,311 @@ void testJsonInterfaceEndToEnd() {
 }
 
 // =============================================================================
+// Helpers for randomized property tests
+// =============================================================================
+struct RandomInstance {
+    Graph graph;
+    std::vector<std::string> stops;
+};
+
+// Complete graph on random points in a 10 km x 10 km square with Euclidean road lengths.
+RandomInstance makeRandomInstance(unsigned seed, int customers) {
+    std::mt19937 rng(seed);
+    std::uniform_real_distribution<double> coord(0.0, 10.0);
+
+    RandomInstance inst;
+    std::vector<std::string> ids;
+    std::vector<std::pair<double, double>> points;
+    for (int i = 0; i <= customers; ++i) {
+        std::string id = (i == 0) ? "W" : "C" + std::to_string(i);
+        double x = coord(rng);
+        double y = coord(rng);
+        inst.graph.addNode(id, id, y, x);
+        ids.push_back(id);
+        points.push_back({x, y});
+        if (i > 0) inst.stops.push_back(id);
+    }
+    for (size_t i = 0; i < ids.size(); ++i) {
+        for (size_t j = i + 1; j < ids.size(); ++j) {
+            double dist = std::hypot(points[i].first - points[j].first, points[i].second - points[j].second);
+            inst.graph.addEdge(ids[i], ids[j], dist);
+        }
+    }
+    return inst;
+}
+
+DistanceMatrix buildMatrix(const RandomInstance& inst) {
+    DistanceMatrix matrix;
+    std::string err;
+    DistanceMatrix::build(inst.graph, "W", inst.stops, matrix, err);
+    return matrix;
+}
+
+// Closed tour [0, perm(1..m-1), 0] visiting every customer exactly once.
+bool isValidClosedTour(const std::vector<int>& tour, size_t m) {
+    if (tour.size() != m + 1 || tour.front() != 0 || tour.back() != 0) return false;
+    std::vector<int> inner(tour.begin() + 1, tour.end() - 1);
+    std::sort(inner.begin(), inner.end());
+    for (size_t i = 0; i < inner.size(); ++i) {
+        if (inner[i] != static_cast<int>(i + 1)) return false;
+    }
+    return true;
+}
+
+bool hasImproving2OptMove(const std::vector<int>& tour, const DistanceMatrix& matrix) {
+    for (size_t i = 1; i + 2 < tour.size(); ++i) {
+        for (size_t k = i + 1; k + 1 < tour.size(); ++k) {
+            double delta = matrix.getDistance(tour[i - 1], tour[k]) + matrix.getDistance(tour[i], tour[k + 1])
+                         - matrix.getDistance(tour[i - 1], tour[i]) - matrix.getDistance(tour[k], tour[k + 1]);
+            if (delta < -1e-9) return true;
+        }
+    }
+    return false;
+}
+
+SimpleJson::JsonValue runJson(const std::string& input, bool* ok = nullptr) {
+    std::string err;
+    return SimpleJson::JsonValue::parse(JsonInterface::processJson(input, ok), err);
+}
+
+// =============================================================================
+// Test Suite 10: Held-Karp Exact DP Matches Brute Force
+// =============================================================================
+void testHeldKarpMatchesBruteForce() {
+    std::cout << "[RUN] testHeldKarpMatchesBruteForce...\n";
+
+    for (int customers = 0; customers <= 8; ++customers) {
+        for (unsigned seed = 1; seed <= 3; ++seed) {
+            DistanceMatrix matrix = buildMatrix(makeRandomInstance(seed * 100 + customers, customers));
+            TourResult exact = HeldKarp::solve(matrix);
+            BruteForceTspResult brute = solveBruteForceTSP(matrix);
+
+            ASSERT_TRUE(exact.success);
+            ASSERT_TRUE(isValidClosedTour(exact.tourIndices, matrix.size()));
+            ASSERT_NEAR(exact.totalDistanceKm, brute.optimalCost, 1e-9);
+            ASSERT_NEAR(TwoOpt::computeTourDistance(exact.tourIndices, matrix), exact.totalDistanceKm, 1e-9);
+        }
+    }
+
+    // Above the limit the exact solver refuses instead of running for minutes.
+    DistanceMatrix big = buildMatrix(makeRandomInstance(7, HeldKarp::kMaxStops + 1));
+    TourResult skipped = HeldKarp::solve(big);
+    ASSERT_FALSE(skipped.success);
+    ASSERT_TRUE(skipped.errorMessage.find("exceeds") != std::string::npos);
+}
+
+// =============================================================================
+// Test Suite 11: Full Pipeline Invariants on Random Instances
+// NN >= 2-Opt >= 2-Opt+Or-opt >= exact optimum, and the final tour is a local optimum.
+// =============================================================================
+void testPipelineInvariantsRandom() {
+    std::cout << "[RUN] testPipelineInvariantsRandom...\n";
+
+    int reachedOptimum = 0;
+    double totalGap = 0.0;
+    const int trials = 30;
+
+    for (unsigned seed = 1; seed <= static_cast<unsigned>(trials); ++seed) {
+        RandomInstance inst = makeRandomInstance(seed, 12);
+        OptimizationPipelineResult res = Optimizer::runPipeline(inst.graph, "W", inst.stops);
+        ASSERT_TRUE(res.success);
+        ASSERT_TRUE(res.exactTour.success);
+
+        const double nn = res.nearestNeighborTour.totalDistanceKm;
+        const double twoOpt = res.twoOptTour.optimizedDistanceKm;
+        const double finalDist = res.optimizedTour.totalDistanceKm;
+        const double exact = res.exactTour.totalDistanceKm;
+
+        ASSERT_TRUE(twoOpt <= nn + 1e-9);
+        ASSERT_TRUE(finalDist <= twoOpt + 1e-9);
+        ASSERT_TRUE(finalDist >= exact - 1e-9);
+        ASSERT_TRUE(isValidClosedTour(res.optimizedTour.tourIndices, res.matrix.size()));
+        ASSERT_NEAR(TwoOpt::computeTourDistance(res.optimizedTour.tourIndices, res.matrix), finalDist, 1e-9);
+
+        // Neither neighborhood can improve the returned tour any further.
+        ASSERT_FALSE(hasImproving2OptMove(res.optimizedTour.tourIndices, res.matrix));
+        std::vector<int> copy = res.optimizedTour.tourIndices;
+        ASSERT_EQ(OrOpt::improve(copy, res.matrix), 0);
+
+        if (finalDist <= exact + 1e-9) reachedOptimum++;
+        totalGap += (finalDist - exact) / exact * 100.0;
+    }
+
+    std::cout << "  -> 2-Opt+Or-opt reached the exact optimum on " << reachedOptimum << "/" << trials
+              << " random 12-stop instances (mean gap " << std::fixed << std::setprecision(3)
+              << totalGap / trials << "%)\n" << std::defaultfloat;
+}
+
+// =============================================================================
+// Test Suite 12: Local Search Operators on Bad Starting Tours
+// =============================================================================
+void testLocalSearchFromShuffledTours() {
+    std::cout << "[RUN] testLocalSearchFromShuffledTours...\n";
+
+    std::mt19937 rng(42);
+    for (unsigned seed = 1; seed <= 10; ++seed) {
+        DistanceMatrix matrix = buildMatrix(makeRandomInstance(seed, 30));
+        std::vector<int> tour(matrix.size() - 1);
+        std::iota(tour.begin(), tour.end(), 1);
+        std::shuffle(tour.begin(), tour.end(), rng);
+        tour.insert(tour.begin(), 0);
+        tour.push_back(0);
+
+        const double before = TwoOpt::computeTourDistance(tour, matrix);
+
+        std::vector<int> orTour = tour;
+        ASSERT_TRUE(OrOpt::improve(orTour, matrix) > 0);
+        ASSERT_TRUE(isValidClosedTour(orTour, matrix.size()));
+        ASSERT_TRUE(TwoOpt::computeTourDistance(orTour, matrix) < before);
+        ASSERT_EQ(OrOpt::improve(orTour, matrix), 0);
+
+        std::vector<int> twoTour = tour;
+        ASSERT_TRUE(TwoOpt::improve(twoTour, matrix) > 0);
+        ASSERT_TRUE(isValidClosedTour(twoTour, matrix.size()));
+        ASSERT_TRUE(TwoOpt::computeTourDistance(twoTour, matrix) < before);
+        ASSERT_FALSE(hasImproving2OptMove(twoTour, matrix));
+    }
+}
+
+// =============================================================================
+// Test Suite 13: On-Demand Road Path Reconstruction & Edge Validation
+// =============================================================================
+void testRoadPathsAndEdgeValidation() {
+    std::cout << "[RUN] testRoadPathsAndEdgeValidation...\n";
+
+    Graph g;
+    g.addNode("W"); g.addNode("J1"); g.addNode("S1");
+    g.addEdge("W", "J1", 1.0);
+    g.addEdge("J1", "S1", 1.0);
+
+    DistanceMatrix matrix;
+    std::string errMsg;
+    ASSERT_TRUE(DistanceMatrix::build(g, "W", {"S1"}, matrix, errMsg));
+
+    std::vector<std::string> self = matrix.getRoadPath("W", "W");
+    ASSERT_EQ(self.size(), 1);
+    ASSERT_EQ(self[0], "W");
+
+    std::vector<std::string> back = matrix.getRoadPath("S1", "W");
+    std::vector<std::string> expected = {"S1", "J1", "W"};
+    ASSERT_TRUE(back == expected);
+    ASSERT_TRUE(matrix.getRoadPath(-1, 0).empty());
+    ASSERT_TRUE(matrix.getRoadPath("W", "GHOST").empty());
+
+    for (double bad : {std::numeric_limits<double>::infinity(), std::numeric_limits<double>::quiet_NaN(), -0.5}) {
+        bool threw = false;
+        try {
+            g.addEdge("W", "S1", bad);
+        } catch (const std::invalid_argument&) {
+            threw = true;
+        }
+        ASSERT_TRUE(threw);
+    }
+}
+
+// =============================================================================
+// Test Suite 14: Strict Request Schema
+// =============================================================================
+void testStrictJsonSchema() {
+    std::cout << "[RUN] testStrictJsonSchema...\n";
+
+    const std::string nodes = R"("nodes": [{"id": "W"}, {"id": "S1"}])";
+    auto request = [&](const std::string& top, const std::string& road) {
+        return "{" + top + ", " + nodes + R"(, "roads": [)" + road + "]}";
+    };
+    const std::string goodTop = R"("warehouse": "W", "stops": ["S1"])";
+    const std::string goodRoad = R"({"source": "W", "target": "S1", "distance_km": 2.0})";
+
+    bool ok = false;
+    SimpleJson::JsonValue res = runJson(request(goodTop, goodRoad), &ok);
+    ASSERT_TRUE(ok);
+    ASSERT_TRUE(res["success"].asBool());
+    ASSERT_NEAR(res["optimizedDistance"].asDouble(), 4.0, 1e-9);
+
+    // Missing distance must not become a free 0 km road.
+    res = runJson(request(goodTop, R"({"source": "W", "target": "S1"})"), &ok);
+    ASSERT_FALSE(ok);
+    ASSERT_TRUE(res["error"].asString().find("distance_km") != std::string::npos);
+
+    // Legacy aliases are rejected.
+    res = runJson(request(goodTop, R"({"source": "W", "target": "S1", "distanceKm": 2.0})"));
+    ASSERT_FALSE(res["success"].asBool());
+    res = runJson(request(R"("warehouseId": "W", "stops": ["S1"])", goodRoad));
+    ASSERT_TRUE(res["error"].asString().find("'warehouse'") != std::string::npos);
+    res = runJson(request(R"("warehouse": "W", "deliveryStops": ["S1"])", goodRoad));
+    ASSERT_TRUE(res["error"].asString().find("'stops'") != std::string::npos);
+    res = runJson(request(R"("warehouse": "W", "stops": [{"id": "S1"}])", goodRoad));
+    ASSERT_TRUE(res["error"].asString().find("Stop at index 0") != std::string::npos);
+
+    // Numbers outside double range are an error, not a crash.
+    res = runJson(request(goodTop, R"({"source": "W", "target": "S1", "distance_km": 1e999})"));
+    ASSERT_TRUE(res["error"].asString().find("out of range") != std::string::npos);
+}
+
+// =============================================================================
+// Test Suite 15: JSON Parser Robustness & Optimal Fields in the Response
+// =============================================================================
+void testJsonParserAndOptimalFields() {
+    std::cout << "[RUN] testJsonParserAndOptimalFields...\n";
+
+    std::string err;
+    SimpleJson::JsonValue::parse("-", err);
+    ASSERT_FALSE(err.empty());
+
+    SimpleJson::JsonValue::parse(std::string(10000, '[') + std::string(10000, ']'), err);
+    ASSERT_TRUE(err.find("nesting") != std::string::npos);
+
+    // Built with char(92) so the source holds escape sequences, not decoded characters.
+    const std::string bs(1, char(92));
+    const std::string escaped = "\"caf" + bs + "u00e9 " + bs + "ud83d" + bs + "ude9a\"";
+    SimpleJson::JsonValue text = SimpleJson::JsonValue::parse(escaped, err);
+    ASSERT_TRUE(err.empty());
+    ASSERT_TRUE(text.asString() == "caf\xC3\xA9 \xF0\x9F\x9A\x9A");
+
+    SimpleJson::JsonValue::parse(R"("\ud83d")", err);
+    ASSERT_TRUE(err.find("surrogate") != std::string::npos);
+
+    ASSERT_EQ(SimpleJson::JsonValue(std::numeric_limits<double>::infinity()).serialize(), "null");
+    SimpleJson::JsonValue huge = SimpleJson::JsonValue::parse(SimpleJson::JsonValue(1e300).serialize(), err);
+    ASSERT_NEAR(huge.asDouble() / 1e300, 1.0, 1e-9);
+
+    // Small instance: exact optimum and gap are reported.
+    SimpleJson::JsonValue small = runJson(R"({
+        "warehouse": "W", "stops": ["A", "B", "C"],
+        "nodes": [{"id": "W"}, {"id": "A"}, {"id": "B"}, {"id": "C"}],
+        "roads": [
+            {"source": "W", "target": "A", "distance_km": 1},
+            {"source": "A", "target": "B", "distance_km": 1},
+            {"source": "B", "target": "C", "distance_km": 1},
+            {"source": "C", "target": "W", "distance_km": 1}
+        ]})");
+    ASSERT_TRUE(small["success"].asBool());
+    ASSERT_NEAR(small["optimalDistance"].asDouble(), 4.0, 1e-9);
+    ASSERT_NEAR(small["optimalityGapPercent"].asDouble(), 0.0, 1e-9);
+    ASSERT_EQ(small["optimalLegs"].asArray().size(), 4);
+    ASSERT_EQ(small["stages"].asArray().size(), 3);
+
+    // Above HeldKarp::kMaxStops the optimal fields are null, the rest still works.
+    std::ostringstream big;
+    const int stops = HeldKarp::kMaxStops + 1;
+    big << R"({"warehouse": "N0", "stops": [)";
+    for (int i = 1; i <= stops; ++i) big << (i > 1 ? "," : "") << "\"N" << i << "\"";
+    big << R"(], "nodes": [)";
+    for (int i = 0; i <= stops; ++i) big << (i > 0 ? "," : "") << R"({"id": "N)" << i << "\"}";
+    big << R"(], "roads": [)";
+    for (int i = 0; i < stops; ++i) {
+        big << (i > 0 ? "," : "") << R"({"source": "N)" << i << R"(", "target": "N)" << i + 1
+            << R"(", "distance_km": 1})";
+    }
+    big << "]}";
+    SimpleJson::JsonValue large = runJson(big.str());
+    ASSERT_TRUE(large["success"].asBool());
+    ASSERT_TRUE(large["optimalDistance"].isNull());
+    ASSERT_TRUE(large["optimalRoute"].isNull());
+    ASSERT_NEAR(large["optimizedDistance"].asDouble(), 2.0 * stops, 1e-9);
+}
+
+// =============================================================================
 // Main Test Runner Entry Point
 // =============================================================================
 int main() {
@@ -600,6 +910,12 @@ int main() {
     testBruteForceOptimalComparison();
     testRouteUtilsExpansion();
     testJsonInterfaceEndToEnd();
+    testHeldKarpMatchesBruteForce();
+    testPipelineInvariantsRandom();
+    testLocalSearchFromShuffledTours();
+    testRoadPathsAndEdgeValidation();
+    testStrictJsonSchema();
+    testJsonParserAndOptimalFields();
 
     std::cout << "======================================================================\n";
     std::cout << "TEST RESULTS SUMMARY:\n";
