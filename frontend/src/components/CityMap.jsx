@@ -45,7 +45,8 @@ function vehicleAt(points, progress) {
 /**
  * Full-bleed SVG city map. Roads come from the same graph sent to the backend;
  * the route line uses the coordinates returned by the backend for the active view.
- * Clicking a non-warehouse node toggles it as a stop.
+ * Clicking a non-warehouse node toggles it as a stop; in add mode, clicking
+ * empty map drops a new stop there.
  */
 export default function CityMap({
   graph,
@@ -58,6 +59,8 @@ export default function CityMap({
   hoveredNodeId,
   onToggleStop,
   togglingDisabled,
+  addMode,
+  onAddStop,
   insets
 }) {
   const wrapRef = useRef(null);
@@ -78,6 +81,9 @@ export default function CityMap({
   const nodes = useMemo(() => graph?.nodes || [], [graph]);
   const roads = useMemo(() => graph?.roads || [], [graph]);
   const warehouseId = graph?.warehouse || 'W';
+  // Framing and basemap come from the preset only, so adding a stop never moves the map.
+  const baseNodes = useMemo(() => nodes.filter((n) => !n.custom), [nodes]);
+  const baseRoads = useMemo(() => roads.filter((r) => !r.custom), [roads]);
 
   const nodeMap = useMemo(() => {
     const map = new Map();
@@ -86,16 +92,16 @@ export default function CityMap({
   }, [nodes]);
 
   const bounds = useMemo(() => {
-    if (nodes.length === 0) return { minLat: 37.77, maxLat: 37.8, minLng: -122.42, maxLng: -122.39 };
+    if (baseNodes.length === 0) return { minLat: 37.77, maxLat: 37.8, minLng: -122.42, maxLng: -122.39 };
     let minLat = Infinity, maxLat = -Infinity, minLng = Infinity, maxLng = -Infinity;
-    nodes.forEach((n) => {
+    baseNodes.forEach((n) => {
       minLat = Math.min(minLat, n.lat);
       maxLat = Math.max(maxLat, n.lat);
       minLng = Math.min(minLng, n.lng);
       maxLng = Math.max(maxLng, n.lng);
     });
     return { minLat, maxLat, minLng, maxLng };
-  }, [nodes]);
+  }, [baseNodes]);
 
   const ins = insets || { left: 40, top: 40, right: 40, bottom: 40 };
   const safe = {
@@ -105,22 +111,38 @@ export default function CityMap({
     h: Math.max(120, size.h - ins.top - ins.bottom)
   };
 
+  const frame = useMemo(() => {
+    const kx = Math.cos((((bounds.minLat + bounds.maxLat) / 2) * Math.PI) / 180);
+    const spanX = (bounds.maxLng - bounds.minLng) * kx || 0.01;
+    const spanY = bounds.maxLat - bounds.minLat || 0.01;
+    const s = Math.min(safe.w / spanX, safe.h / spanY);
+    return {
+      kx,
+      s,
+      ox: safe.x + (safe.w - spanX * s) / 2,
+      oy: safe.y + (safe.h - spanY * s) / 2,
+      cx: safe.x + safe.w / 2,
+      cy: safe.y + safe.h / 2
+    };
+  }, [bounds, safe.x, safe.y, safe.w, safe.h]);
+
   const project = useCallback(
     (lat, lng) => {
-      const kx = Math.cos((((bounds.minLat + bounds.maxLat) / 2) * Math.PI) / 180);
-      const spanX = (bounds.maxLng - bounds.minLng) * kx || 0.01;
-      const spanY = bounds.maxLat - bounds.minLat || 0.01;
-      const s = Math.min(safe.w / spanX, safe.h / spanY);
-      const ox = safe.x + (safe.w - spanX * s) / 2;
-      const oy = safe.y + (safe.h - spanY * s) / 2;
+      const { kx, s, ox, oy, cx, cy } = frame;
       const bx = ox + (lng - bounds.minLng) * kx * s;
       const by = oy + (bounds.maxLat - lat) * s;
-      const cx = safe.x + safe.w / 2;
-      const cy = safe.y + safe.h / 2;
       return { x: cx + (bx - cx) * zoom.k + zoom.x, y: cy + (by - cy) * zoom.k + zoom.y };
     },
-    [bounds, safe.x, safe.y, safe.w, safe.h, zoom]
+    [frame, bounds, zoom]
   );
+
+  // Screen -> lat/lng, the inverse of project().
+  const unproject = (x, y) => {
+    const { kx, s, ox, oy, cx, cy } = frame;
+    const bx = cx + (x - zoom.x - cx) / zoom.k;
+    const by = cy + (y - zoom.y - cy) / zoom.k;
+    return { lat: bounds.maxLat - (by - oy) / s, lng: bounds.minLng + (bx - ox) / (kx * s) };
+  };
 
   // Normalised (u = east, v = north, 0..1 over the node bounds) -> screen.
   const projN = useCallback(
@@ -137,8 +159,8 @@ export default function CityMap({
     const latS = bounds.maxLat - bounds.minLat || 0.01;
     const lngS = bounds.maxLng - bounds.minLng || 0.01;
     const norm = (n) => [(n.lng - bounds.minLng) / lngS, (n.lat - bounds.minLat) / latS];
-    const pts = nodes.map(norm);
-    const segs = roads
+    const pts = baseNodes.map(norm);
+    const segs = baseRoads
       .map((r) => [nodeMap.get(r.source), nodeMap.get(r.target)])
       .filter(([a, b]) => a && b)
       .map(([a, b]) => [...norm(a), ...norm(b)]);
@@ -165,7 +187,7 @@ export default function CityMap({
       minor.push([t2 - skew, -0.6, t2 + skew, 1.6]);
     }
     return { parks, minor };
-  }, [nodes, roads, nodeMap, bounds]);
+  }, [baseNodes, baseRoads, nodeMap, bounds]);
 
   const selectedSet = useMemo(() => new Set(selectedStops), [selectedStops]);
 
@@ -228,14 +250,24 @@ export default function CityMap({
     if (!d) return;
     setZoom((z) => ({ ...z, x: d.zx + e.clientX - d.x, y: d.zy + e.clientY - d.y }));
   };
-  const onPointerUp = () => {
+  const onPointerUp = (e) => {
+    const d = dragRef.current;
+    dragRef.current = null;
+    // A click (not a pan) in add mode drops a stop at that point.
+    if (!d || !addMode || Math.hypot(e.clientX - d.x, e.clientY - d.y) > 5) return;
+    const box = wrapRef.current.getBoundingClientRect();
+    onAddStop(unproject(e.clientX - box.left, e.clientY - box.top));
+  };
+  const onPointerCancel = () => {
     dragRef.current = null;
   };
 
   // ---- layout of markers and labels (greedy, collision-aware) ----
   const markerR = (n) =>
     n.id === warehouseId ? 16 : selectedSet.has(n.id) ? 12 : n.type === 'customer' ? 6 : 4;
-  const screen = nodes.map((n) => ({ n, ...project(n.lat, n.lng), r: markerR(n) }));
+  const screen = nodes
+    .filter((n) => n.type !== 'access')
+    .map((n) => ({ n, ...project(n.lat, n.lng), r: markerR(n) }));
   const placed = screen.map(({ x, y, r }) => ({ x: x - r - 2, y: y - r - 2, w: 2 * r + 4, h: 2 * r + 4 }));
   if (ins.left > 120) placed.push({ x: 0, y: 0, w: ins.left - 12, h: size.h });
   const inView = (b) => b.x > 6 && b.y > 6 && b.x + b.w < size.w - 6 && b.y + b.h < size.h - 6;
@@ -323,11 +355,12 @@ export default function CityMap({
           width={size.w}
           height={size.h}
           fill="#F3F1EC"
-          className="cursor-grab active:cursor-grabbing"
+          className={addMode ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}
+          data-role="map-surface"
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
-          onPointerCancel={onPointerUp}
+          onPointerCancel={onPointerCancel}
         />
 
         <g className="pointer-events-none">
@@ -457,7 +490,7 @@ export default function CityMap({
               tabIndex={0}
               aria-pressed={isStop}
               aria-disabled={togglingDisabled || undefined}
-              aria-label={`Toggle stop ${node.id} – ${node.name}`}
+              aria-label={node.custom ? `Remove stop ${node.name}` : `Toggle stop ${node.id} – ${node.name}`}
               onClick={() => onToggleStop(node.id)}
               onKeyDown={(e) => handleKey(e, node.id)}
             >

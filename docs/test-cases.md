@@ -1,11 +1,12 @@
 # Test Cases & Verification Suite
 
-The project is tested at three layers. All of them run with `npm test` and in CI (Linux and Windows):
+The project is tested at four layers. All of them run with `npm test` and in CI (Linux and Windows):
 
 | Layer | File | Runner | Command |
 |---|---|---|---|
 | C++ algorithm core | `algorithms/tests/test_algorithms.cpp` | CTest | `npm run test:cpp` |
 | Backend API | `backend/tests/api.test.js` | `node:test` | `npm run test:backend` |
+| Frontend graph utils | `frontend/src/utils/customStops.test.js` | `node:test` | `npm run test:frontend` |
 | End-to-end | `scripts/e2e.test.js` | `node:test` | `npm run test:e2e` |
 
 CI also runs the C++ suite under AddressSanitizer + UndefinedBehaviorSanitizer, and smoke-tests the Docker image.

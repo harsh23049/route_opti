@@ -54,9 +54,13 @@ export default function StopItinerary({ routeView, hasRoute, nodeMap, warehouseI
                 </span>
                 <span className="min-w-0 flex-1">
                   <span className={`block truncate ${isWarehouse ? 'text-[#4B5563]' : 'text-[#111827]'}`}>{title}</span>
-                  {leg?.pathNodes && leg.pathNodes.length > 2 && (
-                    <span className="block truncate text-[12px] text-[#9CA3AF]">via {leg.pathNodes.slice(1, -1).join(', ')}</span>
-                  )}
+                  {(() => {
+                    // Road access points for added stops are internal; skip them.
+                    const via = (leg?.pathNodes || []).slice(1, -1).filter((id) => nodeMap?.get(id)?.type !== 'access');
+                    return via.length > 0 && (
+                      <span className="block truncate text-[12px] text-[#9CA3AF]">via {via.join(', ')}</span>
+                    );
+                  })()}
                 </span>
                 <span className="w-14 text-right text-[12.5px] text-[#4B5563]">{leg ? leg.distanceKm.toFixed(2) : ''}</span>
                 <span className="w-16 text-right text-[12.5px] text-[#111827]">{leg ? totals[idx - 1].toFixed(2) : '0.00'}</span>

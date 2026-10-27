@@ -3,18 +3,20 @@ const ghostBtn =
 
 export default function RouteControls({
   presets, selectedPresetId, onChangePreset, selectedStopCount, onResetStops, onClearStops,
-  isLoading, onOptimize, backendHealth
+  isLoading, onOptimize, backendHealth, addingStop, onToggleAddStop
 }) {
   const noStops = selectedStopCount === 0;
   const offline = backendHealth?.checked && !backendHealth?.online;
   const status = !backendHealth?.checked ? 'Checking engine…' : offline ? 'Engine offline' : 'Engine ready';
   const hint = offline
     ? 'Backend offline: run cd backend && npm start'
-    : noStops
-      ? 'Select at least 1 stop on the map.'
-      : isLoading
-        ? 'Map locked while optimizing.'
-        : '';
+    : isLoading
+      ? 'Map locked while optimizing.'
+      : addingStop
+        ? 'Click the map to drop a stop. Click a new stop again to remove it.'
+        : noStops
+          ? 'Select at least 1 stop on the map, or add your own.'
+          : '';
 
   return (
     <div className="px-6 pb-5 pt-5">
@@ -40,6 +42,15 @@ export default function RouteControls({
           <span className="text-[#9CA3AF]"> selected</span>
         </span>
         <div className="-mr-3 flex items-center">
+          <button
+            type="button"
+            className={`${ghostBtn} ${addingStop ? 'bg-[#EEF2FF] text-[#4338CA] hover:bg-[#E0E7FF]' : ''}`}
+            onClick={onToggleAddStop}
+            disabled={isLoading}
+            aria-pressed={addingStop}
+          >
+            {addingStop ? 'Done' : '+ Add stop'}
+          </button>
           <button type="button" className={ghostBtn} onClick={onResetStops} disabled={isLoading}>Reset</button>
           <button type="button" className={ghostBtn} onClick={onClearStops} disabled={isLoading || noStops}>Clear</button>
         </div>

@@ -8,6 +8,7 @@ import Legend from './components/Legend';
 import { SAMPLE_PRESETS } from './data/sampleCityGraph';
 import { checkBackendHealth, optimizeRoute } from './services/optimizerApi';
 import { pickRouteView, resolveView } from './utils/routeView';
+import { withCustomStops } from './utils/customStops';
 
 const PLAYBACK_SPEED = 0.15; // full tour in about 6.5 s
 
@@ -23,6 +24,8 @@ export default function App() {
   );
 
   const [selectedStops, setSelectedStops] = useState(() => defaultStopsFor(SAMPLE_PRESETS[0]));
+  const [customStops, setCustomStops] = useState([]);
+  const [addingStop, setAddingStop] = useState(false);
   const [backendHealth, setBackendHealth] = useState({ online: false, executableExists: false, checked: false });
   const [routeData, setRouteData] = useState(null);
   const [activeView, setActiveView] = useState('optimized');
@@ -51,11 +54,14 @@ export default function App() {
     [isLg]
   );
 
+  // The preset plus user-added stops, each wired onto its nearest road.
+  const graph = useMemo(() => withCustomStops(activePreset, customStops), [activePreset, customStops]);
+
   const nodeMap = useMemo(() => {
     const map = new Map();
-    activePreset.nodes.forEach((n) => map.set(n.id, n));
+    graph.nodes.forEach((n) => map.set(n.id, n));
     return map;
-  }, [activePreset]);
+  }, [graph]);
 
   // Any change to the inputs invalidates the current route.
   const clearResult = useCallback(() => {
@@ -78,17 +84,37 @@ export default function App() {
     const preset = SAMPLE_PRESETS.find((p) => p.id === newPresetId) || SAMPLE_PRESETS[0];
     setSelectedPresetId(preset.id);
     setSelectedNodeId(null);
+    setCustomStops([]);
     applyStops(defaultStopsFor(preset));
   };
 
   const handleToggleStop = (nodeId) => {
     if (isLoading || nodeId === activePreset.warehouse) return;
+    // Added stops exist only while selected, so deselecting one removes it.
+    if (customStops.some((s) => s.id === nodeId)) {
+      setCustomStops(customStops.filter((s) => s.id !== nodeId));
+      applyStops(selectedStops.filter((id) => id !== nodeId));
+      return;
+    }
     const isOn = selectedStops.includes(nodeId);
-    const order = activePreset.nodes.map((n) => n.id);
+    const order = graph.nodes.map((n) => n.id);
     const next = isOn
       ? selectedStops.filter((id) => id !== nodeId)
       : [...selectedStops, nodeId].sort((a, b) => order.indexOf(a) - order.indexOf(b));
     applyStops(next);
+  };
+
+  const handleAddStop = ({ lat, lng }) => {
+    if (isLoading) return;
+    const seq = customStops.reduce((max, s) => Math.max(max, s.seq), 0) + 1;
+    const id = `C${seq}`;
+    setCustomStops([...customStops, { id, seq, name: `New stop ${seq}`, lat, lng }]);
+    applyStops([...selectedStops, id]);
+  };
+
+  const resetStops = (stops) => {
+    setCustomStops([]);
+    applyStops(stops);
   };
 
   // Health probe
@@ -142,8 +168,8 @@ export default function App() {
       const result = await optimizeRoute({
         warehouse: activePreset.warehouse,
         stops: selectedStops,
-        nodes: activePreset.nodes.map(({ id, name, lat, lng }) => ({ id, name, lat, lng })),
-        roads: activePreset.roads
+        nodes: graph.nodes.map(({ id, name, lat, lng }) => ({ id, name, lat, lng })),
+        roads: graph.roads.map(({ source, target, distance_km, street_name }) => ({ source, target, distance_km, street_name }))
       });
       setRouteData(result);
       setActiveView('optimized');
@@ -164,7 +190,7 @@ export default function App() {
     <div className="app-shell relative h-screen w-full overflow-hidden">
       <CityMap
         key={selectedPresetId}
-        graph={activePreset}
+        graph={graph}
         selectedStops={selectedStops}
         routeView={routeView}
         hasRoute={hasRoute}
@@ -174,6 +200,8 @@ export default function App() {
         hoveredNodeId={hoveredNodeId}
         onToggleStop={handleToggleStop}
         togglingDisabled={isLoading}
+        addMode={addingStop && !isLoading}
+        onAddStop={handleAddStop}
         insets={insets}
       />
 
@@ -188,11 +216,13 @@ export default function App() {
             selectedPresetId={selectedPresetId}
             onChangePreset={handlePresetChange}
             selectedStopCount={selectedStops.length}
-            onResetStops={() => applyStops(defaultStopsFor(activePreset))}
-            onClearStops={() => applyStops([])}
+            onResetStops={() => resetStops(defaultStopsFor(activePreset))}
+            onClearStops={() => resetStops([])}
             isLoading={isLoading}
             onOptimize={handleOptimize}
             backendHealth={backendHealth}
+            addingStop={addingStop}
+            onToggleAddStop={() => setAddingStop((on) => !on)}
           />
 
           {errorMessage && (
