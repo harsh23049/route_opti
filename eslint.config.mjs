@@ -11,7 +11,7 @@ export default [
     languageOptions: { ecmaVersion: 'latest', sourceType: 'commonjs', globals: globals.node }
   },
   {
-    files: ['frontend/*.config.js'],
+    files: ['frontend/*.config.js', 'scripts/**/*.mjs'],
     languageOptions: { ecmaVersion: 'latest', sourceType: 'module', globals: globals.node }
   },
   {

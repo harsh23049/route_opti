@@ -3,12 +3,14 @@
  * which spawns the compiled C++ engine for every request.
  * Requires the engine to be built first: npm run build:cpp
  *
- * Covers: empty/invalid input, unreachable stops, malformed JSON, concurrent requests, and
- * that every returned leg (optimized, initial and optimal) follows real road edges.
+ * Covers: empty/invalid input, unreachable stops, malformed JSON, concurrent requests,
+ * that every returned leg (optimized, initial and optimal) follows real road edges, and a
+ * multi-van plan on a real OpenStreetMap city preset.
  */
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');
 const net = require('net');
+const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
 
@@ -78,13 +80,13 @@ after(() => {
 });
 
 // Each leg must start/end at its stops, step only along real roads, and sum to its distance.
-function assertLegsFollowRoads(route, legs, totalDistance) {
+function assertLegsFollowRoads(route, legs, totalDistance, graph = testGraph) {
   const roadLength = new Map();
-  for (const r of testGraph.roads) {
+  for (const r of graph.roads) {
     roadLength.set(`${r.source}->${r.target}`, r.distance_km);
     roadLength.set(`${r.target}->${r.source}`, r.distance_km);
   }
-  const coordOf = new Map(testGraph.nodes.map((n) => [n.id, [n.lat, n.lng]]));
+  const coordOf = new Map(graph.nodes.map((n) => [n.id, [n.lat, n.lng]]));
 
   assert.equal(legs.length, route.length - 1);
   let total = 0;
@@ -175,5 +177,31 @@ describe('end-to-end: backend process + C++ engine', () => {
     assertLegsFollowRoads(data.optimizedRoute, data.legs, data.optimizedDistance);
     assertLegsFollowRoads(data.initialRoute, data.initialLegs, data.initialDistance);
     assertLegsFollowRoads(data.optimalRoute, data.optimalLegs, data.optimalDistance);
+  });
+
+  it('plans 3 vans on a real city preset: every stop served once, on real roads, shorter longest route', async () => {
+    const preset = JSON.parse(
+      fs.readFileSync(path.resolve(__dirname, '../frontend/public/cities/delhi_cp.json'), 'utf8')
+    );
+    const graph = {
+      warehouse: preset.warehouse,
+      stops: preset.availableCustomerStops.slice(0, preset.defaultStopCount),
+      vehicles: 3,
+      nodes: preset.nodes.map(({ id, name, lat, lng }) => ({ id, name, lat, lng })),
+      roads: preset.roads
+    };
+    const res = await post(graph);
+    assert.equal(res.status, 200);
+    const { baseline, optimized } = res.json.fleet;
+
+    for (const plan of [baseline, optimized]) {
+      const served = plan.routes.flatMap((r) => r.route.slice(1, -1)).sort();
+      assert.deepEqual(served, [...graph.stops].sort());
+      assert.ok(plan.routes.length <= 3);
+      for (const r of plan.routes) assertLegsFollowRoads(r.route, r.legs, r.distance, graph);
+      assert.ok(Math.abs(plan.longestRoute - Math.max(...plan.routes.map((r) => r.distance))) < 1e-9);
+    }
+    assert.ok(optimized.longestRoute < baseline.longestRoute);
+    assert.ok(optimized.longestRoute < res.json.optimizedDistance, 'vans finish sooner than one van');
   });
 });
