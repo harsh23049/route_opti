@@ -32,3 +32,9 @@ add_library(optimizer_core STATIC ${SOURCES})
 # Main engine CLI executable
 add_executable(optimizer_engine src/main.cpp)
 target_link_libraries(optimizer_engine PRIVATE optimizer_core)
+
+# Automated Testing with CTest
+enable_testing()
+add_executable(test_runner tests/test_algorithms.cpp)
+target_link_libraries(test_runner PRIVATE optimizer_core)
+add_test(NAME AlgorithmEngineTests COMMAND test_runner)
