@@ -1,5 +1,5 @@
 import { useMemo, useCallback, useEffect, useRef, useState } from 'react';
-import { LINE_STYLES, ACCENT } from '../utils/routeView';
+import { ACCENT } from '../utils/routeView';
 
 const LABEL_SIZE = 12.5;
 const ROAD_LABEL_SIZE = 10.5;
@@ -42,9 +42,47 @@ function vehicleAt(points, progress) {
   return null;
 }
 
+// Direction chevrons every ~72px along a path, kept clear of the vertices.
+function chevronsAlong(points) {
+  const out = [];
+  let carry = 36;
+  for (let i = 1; i < points.length; i++) {
+    const a = points[i - 1], b = points[i];
+    const len = Math.hypot(b.x - a.x, b.y - a.y);
+    const ang = (Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI;
+    let t = carry;
+    while (t < len) {
+      if (t > 20 && len - t > 20) out.push({ x: a.x + ((b.x - a.x) * t) / len, y: a.y + ((b.y - a.y) * t) / len, ang });
+      t += 72;
+    }
+    carry = t - len;
+  }
+  return out;
+}
+
+const toPolyline = (pts) => pts.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+
+// Web Mercator in "world pixels" at zoom 0 (256 px wide), the projection map tiles use.
+const TILE = 256;
+const mercX = (lng) => ((lng + 180) / 360) * TILE;
+const mercY = (lat) => {
+  const s = Math.sin((lat * Math.PI) / 180);
+  return (0.5 - Math.log((1 + s) / (1 - s)) / (4 * Math.PI)) * TILE;
+};
+const lngOf = (x) => (x / TILE) * 360 - 180;
+const latOf = (y) => (Math.atan(Math.sinh(Math.PI * (1 - (2 * y) / TILE))) * 180) / Math.PI;
+
+// Esri World Light Gray Canvas: no API key, street names included. Detail ends at zoom 16;
+// deeper zooms scale those tiles up.
+const TILE_MAX_ZOOM = 16;
+const tileUrl = (z, x, y) =>
+  `https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/${z}/${y}/${x}`;
+
 /**
- * Full-bleed SVG city map. Roads come from the same graph sent to the backend;
- * the route line uses the coordinates returned by the backend for the active view.
+ * Full-bleed SVG city map. Presets with `basemap: 'osm'` are drawn on real map tiles;
+ * the others get an illustrated basemap with roads from the same graph sent to the backend.
+ * Route lines use the coordinates returned by the backend: one line per van, plus the
+ * "before" routes drawn faintly underneath for comparison.
  * Clicking a non-warehouse node toggles it as a stop; in add mode, clicking
  * empty map drops a new stop there.
  */
@@ -52,6 +90,7 @@ export default function CityMap({
   graph,
   selectedStops,
   routeView,
+  beforeCoords,
   hasRoute,
   simulationProgress = 0,
   isPlaying,
@@ -81,6 +120,7 @@ export default function CityMap({
   const nodes = useMemo(() => graph?.nodes || [], [graph]);
   const roads = useMemo(() => graph?.roads || [], [graph]);
   const warehouseId = graph?.warehouse || 'W';
+  const basemap = graph?.basemap === 'osm';
   // Framing and basemap come from the preset only, so adding a stop never moves the map.
   const baseNodes = useMemo(() => nodes.filter((n) => !n.custom), [nodes]);
   const baseRoads = useMemo(() => roads.filter((r) => !r.custom), [roads]);
@@ -111,38 +151,51 @@ export default function CityMap({
     h: Math.max(120, size.h - ins.top - ins.bottom)
   };
 
-  const frame = useMemo(() => {
-    const kx = Math.cos((((bounds.minLat + bounds.maxLat) / 2) * Math.PI) / 180);
-    const spanX = (bounds.maxLng - bounds.minLng) * kx || 0.01;
-    const spanY = bounds.maxLat - bounds.minLat || 0.01;
+  // Fit the node bounds into the safe area, then apply pan/zoom. Screen = origin + world * scale,
+  // an affine map, so tiles and overlays stay aligned.
+  const cam = useMemo(() => {
+    const x0 = mercX(bounds.minLng), y0 = mercY(bounds.maxLat);
+    const spanX = mercX(bounds.maxLng) - x0 || 1e-6;
+    const spanY = mercY(bounds.minLat) - y0 || 1e-6;
     const s = Math.min(safe.w / spanX, safe.h / spanY);
+    const ox = safe.x + (safe.w - spanX * s) / 2, oy = safe.y + (safe.h - spanY * s) / 2;
+    const cx = safe.x + safe.w / 2, cy = safe.y + safe.h / 2;
     return {
-      kx,
-      s,
-      ox: safe.x + (safe.w - spanX * s) / 2,
-      oy: safe.y + (safe.h - spanY * s) / 2,
-      cx: safe.x + safe.w / 2,
-      cy: safe.y + safe.h / 2
+      scale: s * zoom.k,
+      ax: cx + (ox - x0 * s - cx) * zoom.k + zoom.x,
+      ay: cy + (oy - y0 * s - cy) * zoom.k + zoom.y
     };
-  }, [bounds, safe.x, safe.y, safe.w, safe.h]);
+  }, [bounds, safe.x, safe.y, safe.w, safe.h, zoom]);
 
   const project = useCallback(
-    (lat, lng) => {
-      const { kx, s, ox, oy, cx, cy } = frame;
-      const bx = ox + (lng - bounds.minLng) * kx * s;
-      const by = oy + (bounds.maxLat - lat) * s;
-      return { x: cx + (bx - cx) * zoom.k + zoom.x, y: cy + (by - cy) * zoom.k + zoom.y };
-    },
-    [frame, bounds, zoom]
+    (lat, lng) => ({ x: cam.ax + mercX(lng) * cam.scale, y: cam.ay + mercY(lat) * cam.scale }),
+    [cam]
   );
 
   // Screen -> lat/lng, the inverse of project().
-  const unproject = (x, y) => {
-    const { kx, s, ox, oy, cx, cy } = frame;
-    const bx = cx + (x - zoom.x - cx) / zoom.k;
-    const by = cy + (y - zoom.y - cy) / zoom.k;
-    return { lat: bounds.maxLat - (by - oy) / s, lng: bounds.minLng + (bx - ox) / (kx * s) };
-  };
+  const unproject = (x, y) => ({ lat: latOf((y - cam.ay) / cam.scale), lng: lngOf((x - cam.ax) / cam.scale) });
+
+  const tiles = useMemo(() => {
+    if (!basemap) return [];
+    // One zoom level deeper on high-DPI screens keeps street names sharp.
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const z = Math.max(0, Math.min(TILE_MAX_ZOOM, Math.round(Math.log2(cam.scale * dpr))));
+    const n = 2 ** z;
+    const tileSize = (TILE / n) * cam.scale;
+    const range = (origin, length) => [
+      Math.max(0, Math.floor(-origin / tileSize)),
+      Math.min(n - 1, Math.floor((length - origin) / tileSize))
+    ];
+    const [tx0, tx1] = range(cam.ax, size.w);
+    const [ty0, ty1] = range(cam.ay, size.h);
+    const out = [];
+    for (let tx = tx0; tx <= tx1; tx++) {
+      for (let ty = ty0; ty <= ty1; ty++) {
+        out.push({ key: `${z}/${tx}/${ty}`, href: tileUrl(z, tx, ty), x: cam.ax + tx * tileSize, y: cam.ay + ty * tileSize, size: tileSize });
+      }
+    }
+    return out;
+  }, [basemap, cam, size.w, size.h]);
 
   // Normalised (u = east, v = north, 0..1 over the node bounds) -> screen.
   const projN = useCallback(
@@ -156,6 +209,7 @@ export default function CityMap({
 
   // Decorative basemap features, deterministic per graph.
   const decor = useMemo(() => {
+    if (basemap) return { parks: [], minor: [] };
     const latS = bounds.maxLat - bounds.minLat || 0.01;
     const lngS = bounds.maxLng - bounds.minLng || 0.01;
     const norm = (n) => [(n.lng - bounds.minLng) / lngS, (n.lat - bounds.minLat) / latS];
@@ -187,45 +241,37 @@ export default function CityMap({
       minor.push([t2 - skew, -0.6, t2 + skew, 1.6]);
     }
     return { parks, minor };
-  }, [baseNodes, baseRoads, nodeMap, bounds]);
+  }, [basemap, baseNodes, baseRoads, nodeMap, bounds]);
 
   const selectedSet = useMemo(() => new Set(selectedStops), [selectedStops]);
 
-  const visitNumber = useMemo(() => {
+  // Stop id -> visit order within its van and the van's colour.
+  const visits = useMemo(() => {
     const map = new Map();
     if (!hasRoute) return map;
-    let n = 1;
-    routeView.route.forEach((id) => {
-      if (id !== warehouseId && !map.has(id)) map.set(id, n++);
+    routeView.routes.forEach((r) => {
+      let n = 1;
+      r.route.forEach((id) => {
+        if (id !== warehouseId && !map.has(id)) map.set(id, { n: n++, color: routeView.fleet ? r.color : ACCENT });
+      });
     });
     return map;
   }, [routeView, hasRoute, warehouseId]);
 
-  const points = useMemo(
-    () => (hasRoute ? routeView.coords.map(([lat, lng]) => project(lat, lng)) : []),
-    [routeView, hasRoute, project]
+  const toPoints = useCallback((coords) => coords.map(([lat, lng]) => project(lat, lng)), [project]);
+  const lines = useMemo(
+    () => (hasRoute ? routeView.routes.map((r) => ({ ...r, points: toPoints(r.coords) })) : []),
+    [routeView, hasRoute, toPoints]
   );
-  const polyline = points.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');
+  const beforeLines = useMemo(() => (hasRoute ? (beforeCoords || []).map(toPoints) : []), [beforeCoords, hasRoute, toPoints]);
+  const chevrons = useMemo(() => lines.map((l) => chevronsAlong(l.points)), [lines]);
 
-  // Direction chevrons every ~72px along the path, kept clear of the vertices.
-  const chevrons = useMemo(() => {
-    const out = [];
-    let carry = 36;
-    for (let i = 1; i < points.length; i++) {
-      const a = points[i - 1], b = points[i];
-      const len = Math.hypot(b.x - a.x, b.y - a.y);
-      const ang = (Math.atan2(b.y - a.y, b.x - a.x) * 180) / Math.PI;
-      let t = carry;
-      while (t < len) {
-        if (t > 20 && len - t > 20) out.push({ x: a.x + ((b.x - a.x) * t) / len, y: a.y + ((b.y - a.y) * t) / len, ang });
-        t += 72;
-      }
-      carry = t - len;
-    }
-    return out;
-  }, [points]);
-
-  const vehicle = vehicleAt(points, simulationProgress);
+  // All vans leave together at the same speed, so shorter routes finish first.
+  const longest = Math.max(0, ...lines.map((l) => l.distance || 0));
+  const vehicles = lines.map((l) => ({
+    color: routeView.fleet ? l.color : ACCENT,
+    pos: vehicleAt(l.points, longest && l.distance ? (simulationProgress * longest) / l.distance : simulationProgress)
+  }));
 
   const handleKey = (e, id) => {
     if (e.key === 'Enter' || e.key === ' ') {
@@ -236,7 +282,7 @@ export default function CityMap({
 
   const zoomBy = (f) =>
     setZoom((z) => {
-      const k = Math.min(4, Math.max(0.75, z.k * f));
+      const k = Math.min(8, Math.max(0.75, z.k * f));
       const r = k / z.k;
       return { k, x: z.x * r, y: z.y * r };
     });
@@ -266,7 +312,7 @@ export default function CityMap({
   const markerR = (n) =>
     n.id === warehouseId ? 16 : selectedSet.has(n.id) ? 12 : n.type === 'customer' ? 6 : 4;
   const screen = nodes
-    .filter((n) => n.type !== 'access')
+    .filter((n) => n.type !== 'access' && n.type !== 'road')
     .map((n) => ({ n, ...project(n.lat, n.lng), r: markerR(n) }));
   const placed = screen.map(({ x, y, r }) => ({ x: x - r - 2, y: y - r - 2, w: 2 * r + 4, h: 2 * r + 4 }));
   if (ins.left > 120) placed.push({ x: 0, y: 0, w: ins.left - 12, h: size.h });
@@ -293,19 +339,22 @@ export default function CityMap({
   screen.filter((s) => selectedSet.has(s.n.id)).forEach((s) => placeLabel(s, false));
   screen.filter((s) => s.n.type === 'customer' && !selectedSet.has(s.n.id)).forEach((s) => placeLabel(s, false));
 
-  // Keep street names off the route line.
-  for (let i = 1; i < points.length; i++) {
-    const a = points[i - 1], b = points[i];
-    const len = Math.hypot(b.x - a.x, b.y - a.y);
-    for (let t = 0; t <= len; t += 6) {
-      const px = a.x + ((b.x - a.x) * t) / (len || 1), py = a.y + ((b.y - a.y) * t) / (len || 1);
-      placed.push({ x: px - 5, y: py - 5, w: 10, h: 10 });
+  // Keep street names off the route lines.
+  for (const { points } of lines) {
+    for (let i = 1; i < points.length; i++) {
+      const a = points[i - 1], b = points[i];
+      const len = Math.hypot(b.x - a.x, b.y - a.y);
+      for (let t = 0; t <= len; t += 6) {
+        const px = a.x + ((b.x - a.x) * t) / (len || 1), py = a.y + ((b.y - a.y) * t) / (len || 1);
+        placed.push({ x: px - 5, y: py - 5, w: 10, h: 10 });
+      }
     }
   }
+  // Map tiles already carry street names.
   const roadLabels = [];
   roads.forEach((road, idx) => {
     const u = nodeMap.get(road.source), v = nodeMap.get(road.target);
-    if (!u || !v || !road.street_name) return;
+    if (basemap || !u || !v || !road.street_name) return;
     const p1 = project(u.lat, u.lng), p2 = project(v.lat, v.lng);
     const len = Math.hypot(p2.x - p1.x, p2.y - p1.y);
     const w = textWidth(road.street_name, ROAD_LABEL_SIZE);
@@ -328,7 +377,6 @@ export default function CityMap({
     }
   });
 
-  const line = LINE_STYLES[routeView?.view] || LINE_STYLES.optimized;
   const halo = { stroke: '#ffffff', strokeWidth: 3.5, strokeLinejoin: 'round', paintOrder: 'stroke' };
   const iconBtn =
     'flex h-11 w-11 items-center justify-center text-[#374151] hover:bg-[#F3F4F6] hover:text-[#111827]';
@@ -354,7 +402,7 @@ export default function CityMap({
         <rect
           width={size.w}
           height={size.h}
-          fill="#F3F1EC"
+          fill={basemap ? '#F2F0EB' : '#F3F1EC'}
           className={addMode ? 'cursor-crosshair' : 'cursor-grab active:cursor-grabbing'}
           data-role="map-surface"
           onPointerDown={onPointerDown}
@@ -363,6 +411,15 @@ export default function CityMap({
           onPointerCancel={onPointerCancel}
         />
 
+        {tiles.length > 0 && (
+          <g className="pointer-events-none" data-role="tiles">
+            {tiles.map((t) => (
+              <image key={t.key} href={t.href} x={t.x} y={t.y} width={t.size + 0.5} height={t.size + 0.5} preserveAspectRatio="none" />
+            ))}
+          </g>
+        )}
+
+        {!basemap && (
         <g className="pointer-events-none">
           {decor.minor.map(([a, b, c, d], i) => {
             const p = projN(a, b), q = projN(c, d);
@@ -382,7 +439,9 @@ export default function CityMap({
             );
           })}
         </g>
+        )}
 
+        {!basemap && (
         <g className="pointer-events-none">
           {roads.map((road, idx) => {
             const u = nodeMap.get(road.source), v = nodeMap.get(road.target);
@@ -419,49 +478,72 @@ export default function CityMap({
             </text>
           ))}
         </g>
+        )}
 
-        {polyline && (
-          <g className="route">
-            {line.casing && (
-              <polyline points={polyline} fill="none" stroke={line.casing} strokeWidth={line.width + 3} strokeLinecap="round" strokeLinejoin="round" />
-            )}
-            <polyline
-              points={polyline}
-              fill="none"
-              stroke={line.color}
-              strokeWidth={line.width}
-              strokeDasharray={line.dash || undefined}
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              data-role="route"
-            />
-            <polyline points={polyline} fill="none" stroke="transparent" strokeWidth={18} />
-            <polyline
-              className="route-flow pointer-events-none"
-              points={polyline}
-              fill="none"
-              stroke="#ffffff"
-              strokeOpacity="0.55"
-              strokeWidth={2}
-              strokeDasharray="4 12"
-              strokeLinecap="round"
-            />
-            <g className="pointer-events-none">
-              {chevrons.map((c, i) => (
-                <path
-                  key={`cv-${i}`}
-                  d="M-2.5,-3.5 L1.5,0 L-2.5,3.5"
-                  transform={`translate(${c.x.toFixed(1)} ${c.y.toFixed(1)}) rotate(${c.ang.toFixed(1)})`}
-                  fill="none"
-                  stroke={line.dash ? '#6B7280' : '#ffffff'}
-                  strokeWidth={1.8}
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                />
-              ))}
-            </g>
+        {beforeLines.length > 0 && (
+          <g className="pointer-events-none" data-role="before">
+            {beforeLines.map((pts, i) => (
+              <polyline
+                key={`bf-${i}`}
+                points={toPolyline(pts)}
+                fill="none"
+                stroke="#4B5563"
+                strokeOpacity="0.5"
+                strokeWidth={3}
+                strokeDasharray="1 6"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+            ))}
           </g>
         )}
+
+        {lines.map((line, li) => {
+          const polyline = toPolyline(line.points);
+          return (
+            <g key={`route-${li}`} className="route">
+              {line.casing && (
+                <polyline points={polyline} fill="none" stroke={line.casing} strokeWidth={line.width + 3} strokeLinecap="round" strokeLinejoin="round" />
+              )}
+              <polyline
+                points={polyline}
+                fill="none"
+                stroke={line.color}
+                strokeWidth={line.width}
+                strokeDasharray={line.dash || undefined}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                data-role="route"
+                data-vehicle={line.vehicle ?? undefined}
+              />
+              <polyline points={polyline} fill="none" stroke="transparent" strokeWidth={18} />
+              <polyline
+                className="route-flow pointer-events-none"
+                points={polyline}
+                fill="none"
+                stroke="#ffffff"
+                strokeOpacity="0.55"
+                strokeWidth={2}
+                strokeDasharray="4 12"
+                strokeLinecap="round"
+              />
+              <g className="pointer-events-none">
+                {chevrons[li].map((c, i) => (
+                  <path
+                    key={`cv-${i}`}
+                    d="M-2.5,-3.5 L1.5,0 L-2.5,3.5"
+                    transform={`translate(${c.x.toFixed(1)} ${c.y.toFixed(1)}) rotate(${c.ang.toFixed(1)})`}
+                    fill="none"
+                    stroke={line.dash ? '#6B7280' : '#ffffff'}
+                    strokeWidth={1.8}
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                ))}
+              </g>
+            </g>
+          );
+        })}
 
         {screen.map(({ n: node, x, y, r }) => {
           const isHighlighted = selectedNodeId === node.id;
@@ -479,7 +561,8 @@ export default function CityMap({
             );
           }
           const isStop = selectedSet.has(node.id);
-          const order = visitNumber.get(node.id);
+          const visit = visits.get(node.id);
+          const order = visit?.n;
           return (
             <g
               key={node.id}
@@ -500,7 +583,7 @@ export default function CityMap({
               <g className="pin">
                 {isStop ? (
                   <g filter="url(#pin-shadow)">
-                    <circle r={r} fill={ACCENT} stroke="#ffffff" strokeWidth="2.5" />
+                    <circle r={r} fill={visit?.color || ACCENT} stroke="#ffffff" strokeWidth="2.5" />
                   </g>
                 ) : (
                   <circle r={r} fill="#ffffff" stroke={node.type === 'customer' ? '#9CA3AF' : '#B9B5AC'} strokeWidth="1.5" />
@@ -533,16 +616,29 @@ export default function CityMap({
           ))}
         </g>
 
-        {vehicle && (isPlaying || simulationProgress > 0) && (
-          <g transform={`translate(${vehicle.x}, ${vehicle.y})`} className="pointer-events-none" data-role="vehicle">
-            <circle className={isPlaying ? 'vehicle-halo' : ''} r="16" fill={ACCENT} opacity={isPlaying ? undefined : 0.16} />
-            <g filter="url(#pin-shadow)">
-              <circle r="7.5" fill="#ffffff" />
-            </g>
-            <circle r="5" fill={ACCENT} />
-          </g>
-        )}
+        {(isPlaying || simulationProgress > 0) &&
+          vehicles.map(({ pos, color }, i) =>
+            pos ? (
+              <g key={`veh-${i}`} transform={`translate(${pos.x}, ${pos.y})`} className="pointer-events-none" data-role="vehicle">
+                <circle className={isPlaying ? 'vehicle-halo' : ''} r="16" fill={color} opacity={isPlaying ? undefined : 0.16} />
+                <g filter="url(#pin-shadow)">
+                  <circle r="7.5" fill="#ffffff" />
+                </g>
+                <circle r="5" fill={color} />
+              </g>
+            ) : null
+          )}
       </svg>
+
+      {basemap && (
+        <div className="absolute left-2 top-1 rounded bg-white/80 px-1.5 py-0.5 text-[10.5px] text-[#4B5563] lg:bottom-1 lg:left-auto lg:right-2 lg:top-auto">
+          Roads ©{' '}
+          <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noreferrer" className="underline">
+            OpenStreetMap
+          </a>{' '}
+          contributors · Tiles © Esri — Esri, HERE, Garmin
+        </div>
+      )}
 
       <div className="float-card absolute right-4 top-4 flex flex-col overflow-hidden rounded-xl">
         <button type="button" className={iconBtn} onClick={() => zoomBy(1.3)} aria-label="Zoom in">

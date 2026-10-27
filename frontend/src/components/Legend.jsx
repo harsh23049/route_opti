@@ -1,4 +1,4 @@
-import { LINE_STYLES, ACCENT } from '../utils/routeView';
+import { LINE_STYLES, ACCENT, VAN_COLORS } from '../utils/routeView';
 
 function Line({ view }) {
   const s = LINE_STYLES[view];
@@ -10,7 +10,16 @@ function Line({ view }) {
   );
 }
 
-export default function Legend({ className = '' }) {
+function Swatch({ color, dash }) {
+  return (
+    <svg width="22" height="8" viewBox="0 0 22 8" aria-hidden="true">
+      <line x1="2" y1="4" x2="20" y2="4" stroke={color} strokeWidth="3" strokeDasharray={dash} strokeLinecap="round" />
+    </svg>
+  );
+}
+
+/** vans > 0 lists one colour per van instead of the single-route line styles. */
+export default function Legend({ className = '', vans = 0, showBefore = false }) {
   const row = 'flex items-center gap-2.5';
   return (
     <div className={`float-card rounded-xl px-3.5 py-3 text-[12px] text-[#374151] ${className}`} aria-label="Map legend">
@@ -24,9 +33,20 @@ export default function Legend({ className = '' }) {
         <div className={row}>
           <span className="flex w-[22px] justify-center"><span className="h-2.5 w-2.5 rounded-full border-[1.5px] border-[#9CA3AF] bg-white" /></span>Location
         </div>
-        <div className={row}><Line view="nearest_neighbor" />Nearest Neighbor</div>
-        <div className={row}><Line view="optimized" />Optimized</div>
-        <div className={row}><Line view="optimal" />Optimal</div>
+        {vans > 0 ? (
+          VAN_COLORS.slice(0, vans).map((c, i) => (
+            <div key={c} className={row}><Swatch color={c} />Van {i + 1}</div>
+          ))
+        ) : (
+          <>
+            <div className={row}><Line view="nearest_neighbor" />Nearest Neighbor</div>
+            <div className={row}><Line view="optimized" />Optimized</div>
+            <div className={row}><Line view="optimal" />Optimal</div>
+          </>
+        )}
+        {showBefore && (
+          <div className={row}><Swatch color="#4B5563" dash="1 4" />Before</div>
+        )}
       </div>
     </div>
   );

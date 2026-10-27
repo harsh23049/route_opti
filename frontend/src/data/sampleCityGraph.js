@@ -1,4 +1,15 @@
 /**
+ * Real OpenStreetMap road networks, built by scripts/build-city-presets.mjs into
+ * public/cities/ and fetched when selected (each is a few hundred KB).
+ */
+export const CITY_PRESETS = [
+  { id: 'delhi_cp', name: 'New Delhi · Connaught Place (real map)' },
+  { id: 'bengaluru_koramangala', name: 'Bengaluru · Koramangala (real map)' }
+];
+
+export const cityPresetUrl = (id) => `${import.meta.env.BASE_URL}cities/${id}.json`;
+
+/**
  * Sample City Road Network Presets.
  * Labeled as sample data for preview and submission to the C++ algorithm engine.
  * The SVG roads on the map are rendered directly from these road edges.

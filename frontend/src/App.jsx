@@ -5,27 +5,28 @@ import RouteControls from './components/RouteControls';
 import StopItinerary from './components/StopItinerary';
 import Scrubber from './components/Scrubber';
 import Legend from './components/Legend';
-import { SAMPLE_PRESETS } from './data/sampleCityGraph';
+import { CITY_PRESETS, SAMPLE_PRESETS, cityPresetUrl } from './data/sampleCityGraph';
 import { checkBackendHealth, optimizeRoute } from './services/optimizerApi';
-import { pickRouteView, resolveView } from './utils/routeView';
+import { pickRouteView, pickBeforeCoords, resolveView } from './utils/routeView';
 import { withCustomStops } from './utils/customStops';
 
 const PLAYBACK_SPEED = 0.15; // full tour in about 6.5 s
+const PRESET_OPTIONS = [...CITY_PRESETS, ...SAMPLE_PRESETS].map(({ id, name }) => ({ id, name }));
 
 function defaultStopsFor(preset) {
   return preset.availableCustomerStops.slice(0, preset.defaultStopCount);
 }
 
 export default function App() {
-  const [selectedPresetId, setSelectedPresetId] = useState(SAMPLE_PRESETS[0].id);
-  const activePreset = useMemo(
-    () => SAMPLE_PRESETS.find((p) => p.id === selectedPresetId) || SAMPLE_PRESETS[0],
-    [selectedPresetId]
-  );
+  const [selectedPresetId, setSelectedPresetId] = useState(CITY_PRESETS[0].id);
+  const [cities, setCities] = useState({}); // real-city presets loaded so far, by id
+  const activePreset = SAMPLE_PRESETS.find((p) => p.id === selectedPresetId) || cities[selectedPresetId] || null;
 
-  const [selectedStops, setSelectedStops] = useState(() => defaultStopsFor(SAMPLE_PRESETS[0]));
+  const [selectedStops, setSelectedStops] = useState([]);
   const [customStops, setCustomStops] = useState([]);
   const [addingStop, setAddingStop] = useState(false);
+  const [vehicles, setVehicles] = useState(1);
+  const [showBefore, setShowBefore] = useState(true);
   const [backendHealth, setBackendHealth] = useState({ online: false, executableExists: false, checked: false });
   const [routeData, setRouteData] = useState(null);
   const [activeView, setActiveView] = useState('optimized');
@@ -45,21 +46,57 @@ export default function App() {
     return () => mq.removeEventListener('change', onChange);
   }, []);
 
+  // Real-city presets are fetched on first use; their default stops apply once loaded.
+  useEffect(() => {
+    if (!CITY_PRESETS.some((c) => c.id === selectedPresetId) || cities[selectedPresetId]) return undefined;
+    let alive = true;
+    fetch(cityPresetUrl(selectedPresetId))
+      .then((res) => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      })
+      .then((preset) => {
+        if (!alive) return;
+        setCities((prev) => ({ ...prev, [preset.id]: preset }));
+        setSelectedStops(defaultStopsFor(preset));
+      })
+      .catch((err) => {
+        if (alive) setErrorMessage(`The city map could not be loaded (${err.message}).`);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [selectedPresetId, cities]);
+
   // Map area that stays clear of the floating panel / bottom sheet.
   const insets = useMemo(
     () =>
       isLg
-        ? { left: 452, top: 72, right: 190, bottom: 120 }
+        ? { left: 452, top: 72, right: 190, bottom: 228 }
         : { left: 24, top: 28, right: 76, bottom: Math.round(window.innerHeight * 0.5) + 84 },
     [isLg]
   );
 
   // The preset plus user-added stops, each wired onto its nearest road.
-  const graph = useMemo(() => withCustomStops(activePreset, customStops), [activePreset, customStops]);
+  const graph = useMemo(
+    () => (activePreset ? withCustomStops(activePreset, customStops) : null),
+    [activePreset, customStops]
+  );
 
   const nodeMap = useMemo(() => {
     const map = new Map();
-    graph.nodes.forEach((n) => map.set(n.id, n));
+    graph?.nodes.forEach((n) => map.set(n.id, n));
+    return map;
+  }, [graph]);
+
+  // "a|b" -> street name, for the "via" lines of the itinerary.
+  const roadNames = useMemo(() => {
+    const map = new Map();
+    graph?.roads.forEach((r) => {
+      if (!r.street_name) return;
+      map.set(`${r.source}|${r.target}`, r.street_name);
+      map.set(`${r.target}|${r.source}`, r.street_name);
+    });
     return map;
   }, [graph]);
 
@@ -81,15 +118,15 @@ export default function App() {
   );
 
   const handlePresetChange = (newPresetId) => {
-    const preset = SAMPLE_PRESETS.find((p) => p.id === newPresetId) || SAMPLE_PRESETS[0];
-    setSelectedPresetId(preset.id);
+    const preset = SAMPLE_PRESETS.find((p) => p.id === newPresetId) || cities[newPresetId];
+    setSelectedPresetId(newPresetId);
     setSelectedNodeId(null);
     setCustomStops([]);
-    applyStops(defaultStopsFor(preset));
+    applyStops(preset ? defaultStopsFor(preset) : []);
   };
 
   const handleToggleStop = (nodeId) => {
-    if (isLoading || nodeId === activePreset.warehouse) return;
+    if (isLoading || !graph || nodeId === graph.warehouse) return;
     // Added stops exist only while selected, so deselecting one removes it.
     if (customStops.some((s) => s.id === nodeId)) {
       setCustomStops(customStops.filter((s) => s.id !== nodeId));
@@ -105,7 +142,7 @@ export default function App() {
   };
 
   const handleAddStop = ({ lat, lng }) => {
-    if (isLoading) return;
+    if (isLoading || !graph) return;
     const seq = customStops.reduce((max, s) => Math.max(max, s.seq), 0) + 1;
     const id = `C${seq}`;
     setCustomStops([...customStops, { id, seq, name: `New stop ${seq}`, lat, lng }]);
@@ -115,6 +152,11 @@ export default function App() {
   const resetStops = (stops) => {
     setCustomStops([]);
     applyStops(stops);
+  };
+
+  const handleVehicles = (count) => {
+    setVehicles(count);
+    clearResult();
   };
 
   // Health probe
@@ -159,15 +201,16 @@ export default function App() {
   };
 
   const handleOptimize = async () => {
-    if (isLoading || selectedStops.length === 0) return;
+    if (isLoading || !graph || selectedStops.length === 0) return;
     setIsLoading(true);
     setErrorMessage(null);
     setIsPlaying(false);
     setSimulationProgress(0);
     try {
       const result = await optimizeRoute({
-        warehouse: activePreset.warehouse,
+        warehouse: graph.warehouse,
         stops: selectedStops,
+        vehicles,
         nodes: graph.nodes.map(({ id, name, lat, lng }) => ({ id, name, lat, lng })),
         roads: graph.roads.map(({ source, target, distance_km, street_name }) => ({ source, target, distance_km, street_name }))
       });
@@ -183,6 +226,10 @@ export default function App() {
 
   const view = resolveView(routeData, activeView);
   const routeView = useMemo(() => pickRouteView(routeData, view), [routeData, view]);
+  const beforeCoords = useMemo(
+    () => (showBefore ? pickBeforeCoords(routeData, view) : []),
+    [routeData, view, showBefore]
+  );
 
   const hasRoute = Boolean(routeData);
 
@@ -193,6 +240,7 @@ export default function App() {
         graph={graph}
         selectedStops={selectedStops}
         routeView={routeView}
+        beforeCoords={beforeCoords}
         hasRoute={hasRoute}
         simulationProgress={simulationProgress}
         isPlaying={playing}
@@ -200,7 +248,7 @@ export default function App() {
         hoveredNodeId={hoveredNodeId}
         onToggleStop={handleToggleStop}
         togglingDisabled={isLoading}
-        addMode={addingStop && !isLoading}
+        addMode={addingStop && !isLoading && Boolean(graph)}
         onAddStop={handleAddStop}
         insets={insets}
       />
@@ -212,12 +260,15 @@ export default function App() {
         <div className="mx-auto mt-2 h-1 w-9 shrink-0 rounded-full bg-[#E5E7EB] lg:hidden" aria-hidden="true" />
         <div className="min-h-0 flex-1 overflow-y-auto">
           <RouteControls
-            presets={SAMPLE_PRESETS}
+            presets={PRESET_OPTIONS}
             selectedPresetId={selectedPresetId}
             onChangePreset={handlePresetChange}
+            presetLoading={!graph}
             selectedStopCount={selectedStops.length}
-            onResetStops={() => resetStops(defaultStopsFor(activePreset))}
+            onResetStops={() => activePreset && resetStops(defaultStopsFor(activePreset))}
             onClearStops={() => resetStops([])}
+            vehicles={vehicles}
+            onChangeVehicles={handleVehicles}
             isLoading={isLoading}
             onOptimize={handleOptimize}
             backendHealth={backendHealth}
@@ -241,22 +292,36 @@ export default function App() {
           )}
 
           <div className="border-t border-[#F0F1F3]">
-            <MetricCards routeData={routeData} isLoading={isLoading} activeView={view} onChangeView={setActiveView} />
+            <MetricCards
+              routeData={routeData}
+              isLoading={isLoading}
+              activeView={view}
+              onChangeView={setActiveView}
+              showBefore={showBefore}
+              onToggleBefore={() => setShowBefore((on) => !on)}
+            />
           </div>
           <StopItinerary
             routeView={routeView}
             hasRoute={hasRoute && !isLoading}
             nodeMap={nodeMap}
-            warehouseId={activePreset.warehouse}
+            roadNames={roadNames}
+            warehouseId={graph?.warehouse}
             selectedNodeId={selectedNodeId}
             onSelectNode={setSelectedNodeId}
             onHoverNode={setHoveredNodeId}
           />
-          <p className="border-t border-[#F0F1F3] px-6 py-4 text-[12px] leading-relaxed text-[#9CA3AF]">{activePreset.description}</p>
+          {activePreset && (
+            <p className="border-t border-[#F0F1F3] px-6 py-4 text-[12px] leading-relaxed text-[#9CA3AF]">{activePreset.description}</p>
+          )}
         </div>
       </aside>
 
-      <Legend className="absolute bottom-4 left-[436px] hidden lg:block" />
+      <Legend
+        className="absolute bottom-4 left-[436px] hidden lg:block"
+        vans={routeView.fleet ? routeView.routes.length : 0}
+        showBefore={hasRoute && showBefore && beforeCoords.length > 0}
+      />
 
       {hasRoute && (
         <div className="pointer-events-none absolute inset-x-3 bottom-[calc(50vh+12px)] flex justify-center lg:bottom-4 lg:left-[436px] lg:right-4 lg:justify-end xl:justify-center">
