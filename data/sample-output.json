@@ -1,0 +1,99 @@
+{
+  "distanceSaved": 0,
+  "executionTimeMs": 0.094417,
+  "fullCoordinates": [
+    [37.783, -122.408],
+    [37.7795, -122.418],
+    [37.7845, -122.404],
+    [37.7818, -122.401],
+    [37.782, -122.394],
+    [37.7875, -122.391],
+    [37.7915, -122.399],
+    [37.794, -122.402],
+    [37.788, -122.403],
+    [37.783, -122.408]
+  ],
+  "fullRoadPath": [
+    "node_0",
+    "node_5",
+    "j_2",
+    "j_3",
+    "node_4",
+    "node_3",
+    "node_1",
+    "node_2",
+    "j_1",
+    "node_0"
+  ],
+  "improvementPercent": 0,
+  "initialDistance": 6.9,
+  "initialRoute": ["node_0", "node_5", "node_4", "node_3", "node_1", "node_2", "node_0"],
+  "legs": [
+    {
+      "coordinates": [
+        [37.783, -122.408],
+        [37.7795, -122.418]
+      ],
+      "distanceKm": 1.2,
+      "from": "node_0",
+      "pathNodes": ["node_0", "node_5"],
+      "to": "node_5"
+    },
+    {
+      "coordinates": [
+        [37.7795, -122.418],
+        [37.7845, -122.404],
+        [37.7818, -122.401],
+        [37.782, -122.394]
+      ],
+      "distanceKm": 2.1,
+      "from": "node_5",
+      "pathNodes": ["node_5", "j_2", "j_3", "node_4"],
+      "to": "node_4"
+    },
+    {
+      "coordinates": [
+        [37.782, -122.394],
+        [37.7875, -122.391]
+      ],
+      "distanceKm": 0.75,
+      "from": "node_4",
+      "pathNodes": ["node_4", "node_3"],
+      "to": "node_3"
+    },
+    {
+      "coordinates": [
+        [37.7875, -122.391],
+        [37.7915, -122.399]
+      ],
+      "distanceKm": 0.9,
+      "from": "node_3",
+      "pathNodes": ["node_3", "node_1"],
+      "to": "node_1"
+    },
+    {
+      "coordinates": [
+        [37.7915, -122.399],
+        [37.794, -122.402]
+      ],
+      "distanceKm": 0.4,
+      "from": "node_1",
+      "pathNodes": ["node_1", "node_2"],
+      "to": "node_2"
+    },
+    {
+      "coordinates": [
+        [37.794, -122.402],
+        [37.788, -122.403],
+        [37.783, -122.408]
+      ],
+      "distanceKm": 1.55,
+      "from": "node_2",
+      "pathNodes": ["node_2", "j_1", "node_0"],
+      "to": "node_0"
+    }
+  ],
+  "optimizedDistance": 6.9,
+  "optimizedRoute": ["node_0", "node_5", "node_4", "node_3", "node_1", "node_2", "node_0"],
+  "success": true
+}

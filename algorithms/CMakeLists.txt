@@ -24,6 +24,8 @@ set(SOURCES
     src/TwoOpt.cpp
     src/RouteUtils.cpp
     src/Optimizer.cpp
+    src/Json.cpp
+    src/JsonInterface.cpp
 )
 
 # Static library for core algorithms

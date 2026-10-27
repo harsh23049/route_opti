@@ -1,0 +1,29 @@
+{
+  "warehouse": "node_0",
+  "stops": ["node_1", "node_2", "node_3", "node_4", "node_5"],
+  "nodes": [
+    { "id": "node_0", "name": "Central Logistics Hub", "lat": 37.7830, "lng": -122.4080 },
+    { "id": "node_1", "name": "North Market Stop",     "lat": 37.7915, "lng": -122.3990 },
+    { "id": "node_2", "name": "Financial Tower",      "lat": 37.7940, "lng": -122.4020 },
+    { "id": "node_3", "name": "Tech Innovation Hub",  "lat": 37.7875, "lng": -122.3910 },
+    { "id": "node_4", "name": "South Park Station",    "lat": 37.7820, "lng": -122.3940 },
+    { "id": "node_5", "name": "Civic Center Drop",     "lat": 37.7795, "lng": -122.4185 },
+    { "id": "j_1",    "name": "Market & 3rd Junction", "lat": 37.7880, "lng": -122.4030 },
+    { "id": "j_2",    "name": "Mission & 4th Junction","lat": 37.7845, "lng": -122.4040 },
+    { "id": "j_3",    "name": "Folsom Crossroads",     "lat": 37.7818, "lng": -122.4010 }
+  ],
+  "roads": [
+    { "source": "node_0", "target": "j_1",    "distance_km": 0.85, "street_name": "Hub Main Way" },
+    { "source": "node_0", "target": "j_2",    "distance_km": 0.50, "street_name": "Logistics Boulevard" },
+    { "source": "node_0", "target": "node_5", "distance_km": 1.20, "street_name": "Civic Avenue" },
+    { "source": "j_1",    "target": "node_1", "distance_km": 0.65, "street_name": "Market Street North" },
+    { "source": "node_1", "target": "node_2", "distance_km": 0.40, "street_name": "Financial Plaza Way" },
+    { "source": "node_2", "target": "j_1",    "distance_km": 0.70, "street_name": "Tower Expressway" },
+    { "source": "j_1",    "target": "j_2",    "distance_km": 0.45, "street_name": "Midtown Connector" },
+    { "source": "j_2",    "target": "j_3",    "distance_km": 0.40, "street_name": "Mission Crossway" },
+    { "source": "j_3",    "target": "node_4", "distance_km": 0.60, "street_name": "South Park Lane" },
+    { "source": "node_4", "target": "node_3", "distance_km": 0.75, "street_name": "Tech Corridor" },
+    { "source": "node_3", "target": "node_1", "distance_km": 0.90, "street_name": "East Bay Arterial" },
+    { "source": "node_5", "target": "j_2",    "distance_km": 1.10, "street_name": "Westgate Link" }
+  ]
+}

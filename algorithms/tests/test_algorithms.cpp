@@ -4,6 +4,8 @@
 #include "NearestNeighbor.h"
 #include "TwoOpt.h"
 #include "RouteUtils.h"
+#include "Json.h"
+#include "JsonInterface.h"
 
 #include <iostream>
 #include <iomanip>
@@ -511,6 +513,77 @@ void testRouteUtilsExpansion() {
 }
 
 // =============================================================================
+// Test Suite 9: JSON Input/Output Interface End-to-End
+// =============================================================================
+void testJsonInterfaceEndToEnd() {
+    std::cout << "[RUN] testJsonInterfaceEndToEnd...\n";
+
+    // 1. Valid JSON payload
+    std::string validJson = R"({
+        "warehouse": "W",
+        "stops": ["S1", "S2"],
+        "nodes": [
+            {"id": "W", "lat": 37.78, "lng": -122.40},
+            {"id": "S1", "lat": 37.79, "lng": -122.41},
+            {"id": "S2", "lat": 37.80, "lng": -122.39}
+        ],
+        "roads": [
+            {"source": "W", "target": "S1", "distance_km": 1.5},
+            {"source": "S1", "target": "S2", "distance_km": 2.0},
+            {"source": "S2", "target": "W", "distance_km": 2.5}
+        ]
+    })";
+
+    std::string responseStr = JsonInterface::processJson(validJson);
+    std::string parseErr;
+    SimpleJson::JsonValue res = SimpleJson::JsonValue::parse(responseStr, parseErr);
+
+    ASSERT_TRUE(parseErr.empty());
+    ASSERT_TRUE(res.isObject());
+    ASSERT_TRUE(res["success"].asBool());
+    ASSERT_TRUE(res.has("initialRoute"));
+    ASSERT_TRUE(res.has("optimizedRoute"));
+    ASSERT_TRUE(res.has("initialDistance"));
+    ASSERT_TRUE(res.has("optimizedDistance"));
+    ASSERT_TRUE(res.has("distanceSaved"));
+    ASSERT_TRUE(res.has("improvementPercent"));
+    ASSERT_TRUE(res.has("executionTimeMs"));
+    ASSERT_TRUE(res.has("legs"));
+    ASSERT_TRUE(res.has("fullRoadPath"));
+    ASSERT_TRUE(res.has("fullCoordinates"));
+
+    ASSERT_NEAR(res["initialDistance"].asDouble(), 6.0, 1e-6);
+    ASSERT_NEAR(res["optimizedDistance"].asDouble(), 6.0, 1e-6);
+
+    // 2. Malformed JSON payload
+    std::string badJson = "{ invalid json here ";
+    std::string badResponseStr = JsonInterface::processJson(badJson);
+    SimpleJson::JsonValue badRes = SimpleJson::JsonValue::parse(badResponseStr, parseErr);
+    ASSERT_TRUE(badRes.isObject());
+    ASSERT_FALSE(badRes["success"].asBool());
+    ASSERT_TRUE(badRes.has("error"));
+
+    // 3. Unreachable stop payload
+    std::string unreachableJson = R"({
+        "warehouse": "W",
+        "stops": ["S1", "ISLAND"],
+        "nodes": [
+            {"id": "W", "lat": 0, "lng": 0},
+            {"id": "S1", "lat": 1, "lng": 1},
+            {"id": "ISLAND", "lat": 5, "lng": 5}
+        ],
+        "roads": [
+            {"source": "W", "target": "S1", "distance_km": 1.0}
+        ]
+    })";
+    std::string unreachResponseStr = JsonInterface::processJson(unreachableJson);
+    SimpleJson::JsonValue unreachRes = SimpleJson::JsonValue::parse(unreachResponseStr, parseErr);
+    ASSERT_TRUE(unreachRes.isObject());
+    ASSERT_FALSE(unreachRes["success"].asBool());
+    ASSERT_TRUE(unreachRes["error"].asString().find("Unreachable") != std::string::npos);
+}
+
+// =============================================================================
 // Main Test Runner Entry Point
 // =============================================================================
 int main() {
@@ -526,6 +599,7 @@ int main() {
     testSmallAndInvalidInputs();
     testBruteForceOptimalComparison();
     testRouteUtilsExpansion();
+    testJsonInterfaceEndToEnd();
 
     std::cout << "======================================================================\n";
     std::cout << "TEST RESULTS SUMMARY:\n";
