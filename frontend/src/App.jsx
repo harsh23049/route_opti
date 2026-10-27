@@ -100,6 +100,7 @@ export default function App() {
 
   // 3. Execution handler invoking Express API -> C++ binary
   const handleExecuteOptimization = async (targetAlgorithm) => {
+    if (isLoading) return; // Prevent repeated clicks while in-flight
     setIsLoading(true);
     setErrorMessage(null);
     setIsPlaying(false);

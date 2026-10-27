@@ -95,11 +95,18 @@ export default function CityMap({
   const routePolylinePoints = useMemo(() => {
     if (!activeRouteData) return [];
 
-    // Use fullCoordinates or assemble from legs
-    let rawCoords = activeRouteData.fullCoordinates || [];
-    if (rawCoords.length === 0 && activeRouteData.legs) {
+    const isNN = activeAlgorithm === 'nearest_neighbor';
+    let rawCoords = isNN
+      ? (activeRouteData.initialFullCoordinates || [])
+      : (activeRouteData.fullCoordinates || []);
+
+    if (rawCoords.length === 0) {
+      const sourceLegs = isNN && activeRouteData.initialLegs
+        ? activeRouteData.initialLegs
+        : (activeRouteData.legs || []);
+
       const collected = [];
-      activeRouteData.legs.forEach((leg, legIdx) => {
+      sourceLegs.forEach((leg, legIdx) => {
         if (leg.coordinates) {
           leg.coordinates.forEach((coord, idx) => {
             if (legIdx > 0 && idx === 0) return; // avoid duplicate seam point
@@ -111,7 +118,7 @@ export default function CityMap({
     }
 
     return rawCoords.map(([lat, lng]) => project(lat, lng));
-  }, [activeRouteData, bounds]);
+  }, [activeRouteData, activeAlgorithm, bounds]);
 
   const routePolylineString = useMemo(() => {
     return routePolylinePoints.map((p) => `${p.x.toFixed(1)},${p.y.toFixed(1)}`).join(' ');

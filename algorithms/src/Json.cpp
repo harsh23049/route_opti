@@ -256,7 +256,7 @@ void JsonValue::serializeInternal(std::ostream& os, int currentIndent, int inden
             if (numVal_ == static_cast<long long>(numVal_)) {
                 os << static_cast<long long>(numVal_);
             } else {
-                os << std::setprecision(6) << numVal_;
+                os << std::setprecision(12) << numVal_;
             }
             break;
         }

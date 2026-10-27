@@ -170,54 +170,76 @@ std::string JsonInterface::processJson(const std::string& inputJson) {
     response["improvementPercent"] = pipeline.twoOptTour.percentageImprovement;
     response["executionTimeMs"] = totalExecutionTimeMs;
 
-    // Route Geometry & Legs for Frontend Rendering
-    SimpleJson::JsonValue legsArr;
-    const auto& optTour = pipeline.twoOptTour.optimizedTour;
-    for (size_t i = 0; i < optTour.size() - 1; ++i) {
-        const std::string& u = optTour[i];
-        const std::string& v = optTour[i + 1];
+    // Helper lambda to construct leg geometries and full coordinate sequences
+    auto buildLegsAndCoords = [&](const std::vector<std::string>& tour,
+                                  const std::vector<std::string>& fullRoadPath,
+                                  SimpleJson::JsonValue& outLegs,
+                                  SimpleJson::JsonValue& outFullPath,
+                                  SimpleJson::JsonValue& outFullCoords) {
+        for (size_t i = 0; i < tour.size() - 1; ++i) {
+            const std::string& u = tour[i];
+            const std::string& v = tour[i + 1];
 
-        SimpleJson::JsonValue legObj;
-        legObj["from"] = u;
-        legObj["to"] = v;
-        legObj["distanceKm"] = pipeline.matrix.getDistance(u, v);
+            SimpleJson::JsonValue legObj;
+            legObj["from"] = u;
+            legObj["to"] = v;
+            legObj["distanceKm"] = pipeline.matrix.getDistance(u, v);
 
-        const auto& pathNodes = pipeline.matrix.getRoadPath(u, v);
-        SimpleJson::JsonValue nodesArrVal;
-        SimpleJson::JsonValue coordsArrVal;
+            const auto& pathNodes = pipeline.matrix.getRoadPath(u, v);
+            SimpleJson::JsonValue nodesArrVal;
+            SimpleJson::JsonValue coordsArrVal;
 
-        for (const auto& nodeId : pathNodes) {
-            nodesArrVal.push_back(nodeId);
+            for (const auto& nodeId : pathNodes) {
+                nodesArrVal.push_back(nodeId);
+                auto it = nodeCoords.find(nodeId);
+                if (it != nodeCoords.end()) {
+                    SimpleJson::JsonValue coordPair;
+                    coordPair.push_back(it->second.first);  // lat
+                    coordPair.push_back(it->second.second); // lng
+                    coordsArrVal.push_back(coordPair);
+                }
+            }
+            legObj["pathNodes"] = nodesArrVal;
+            legObj["coordinates"] = coordsArrVal;
+
+            outLegs.push_back(legObj);
+        }
+
+        for (const auto& nodeId : fullRoadPath) {
+            outFullPath.push_back(nodeId);
             auto it = nodeCoords.find(nodeId);
             if (it != nodeCoords.end()) {
                 SimpleJson::JsonValue coordPair;
                 coordPair.push_back(it->second.first);  // lat
                 coordPair.push_back(it->second.second); // lng
-                coordsArrVal.push_back(coordPair);
+                outFullCoords.push_back(coordPair);
             }
         }
-        legObj["pathNodes"] = nodesArrVal;
-        legObj["coordinates"] = coordsArrVal;
+    };
 
-        legsArr.push_back(legObj);
-    }
-    response["legs"] = legsArr;
-
-    // Full road intersection sequence & coordinate path
+    // 2-Opt Optimized Route Geometries (primary)
+    SimpleJson::JsonValue legsArr;
     SimpleJson::JsonValue fullPathArr;
     SimpleJson::JsonValue fullCoordsArr;
-    for (const auto& nodeId : pipeline.optimizedFullRoadPath) {
-        fullPathArr.push_back(nodeId);
-        auto it = nodeCoords.find(nodeId);
-        if (it != nodeCoords.end()) {
-            SimpleJson::JsonValue coordPair;
-            coordPair.push_back(it->second.first);  // lat
-            coordPair.push_back(it->second.second); // lng
-            fullCoordsArr.push_back(coordPair);
-        }
-    }
+    buildLegsAndCoords(pipeline.twoOptTour.optimizedTour,
+                       pipeline.optimizedFullRoadPath,
+                       legsArr, fullPathArr, fullCoordsArr);
+
+    response["legs"] = legsArr;
     response["fullRoadPath"] = fullPathArr;
     response["fullCoordinates"] = fullCoordsArr;
+
+    // Nearest Neighbor Initial Route Geometries (for comparative map visualization)
+    SimpleJson::JsonValue initLegsArr;
+    SimpleJson::JsonValue initFullPathArr;
+    SimpleJson::JsonValue initFullCoordsArr;
+    buildLegsAndCoords(pipeline.nearestNeighborTour.tour,
+                       pipeline.initialFullRoadPath,
+                       initLegsArr, initFullPathArr, initFullCoordsArr);
+
+    response["initialLegs"] = initLegsArr;
+    response["initialFullRoadPath"] = initFullPathArr;
+    response["initialFullCoordinates"] = initFullCoordsArr;
 
     // Diagnostics / Summary to stderr
     std::cerr << "[JsonInterface] Processed route successfully: "

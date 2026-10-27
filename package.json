@@ -1,0 +1,31 @@
+{
+  "name": "smart-delivery-optimizer-monorepo",
+  "version": "1.0.0",
+  "description": "Smart Delivery Route Optimization Monorepo (C++17 Engine + Express API + React Frontend)",
+  "private": true,
+  "scripts": {
+    "build:cpp": "cmake -B algorithms/build -S algorithms && cmake --build algorithms/build",
+    "test:cpp": "ctest --test-dir algorithms/build --output-on-failure",
+    "build:frontend": "npm run build --prefix frontend",
+    "test:backend": "npm test --prefix backend",
+    "test:e2e": "node scripts/e2e-test.js",
+    "test": "npm run test:cpp && npm run test:backend && npm run test:e2e",
+    "start:backend": "npm start --prefix backend",
+    "dev:backend": "npm run dev --prefix backend",
+    "dev:frontend": "npm run dev --prefix frontend",
+    "start": "node backend/src/app.js"
+  },
+  "keywords": [
+    "route-optimization",
+    "tsp",
+    "dijkstra",
+    "two-opt",
+    "nearest-neighbor",
+    "cpp17",
+    "express",
+    "react",
+    "vite"
+  ],
+  "author": "",
+  "license": "ISC"
+}

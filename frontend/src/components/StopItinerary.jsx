@@ -17,12 +17,14 @@ export default function StopItinerary({
     );
   }
 
-  const tour =
-    activeAlgorithm === 'nearest_neighbor'
-      ? routeData.initialRoute || []
-      : routeData.optimizedRoute || [];
+  const isNN = activeAlgorithm === 'nearest_neighbor';
+  const tour = isNN
+    ? routeData.initialRoute || []
+    : routeData.optimizedRoute || [];
 
-  const legs = routeData.legs || [];
+  const legs = isNN && routeData.initialLegs
+    ? routeData.initialLegs
+    : (routeData.legs || []);
 
   return (
     <div className="p-4 rounded-2xl bg-slate-900/90 border border-slate-800 shadow-xl flex flex-col h-full max-h-[580px]">

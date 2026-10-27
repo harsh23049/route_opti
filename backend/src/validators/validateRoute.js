@@ -93,6 +93,7 @@ function validateOptimizeInput(body) {
 
     // Determine distance/weight
     let dist = road.distance_km;
+    if (dist === undefined) dist = road.distanceKm;
     if (dist === undefined) dist = road.distance;
     if (dist === undefined) dist = road.weight;
 
@@ -139,6 +140,10 @@ function validateOptimizeInput(body) {
 
       normalizedStops.push(stopId);
     }
+  }
+
+  if (normalizedStops.length === 0) {
+    return { isValid: false, error: "At least one required delivery stop must be provided in 'stops'" };
   }
 
   return {
