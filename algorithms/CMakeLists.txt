@@ -17,6 +17,12 @@ include_directories(include)
 
 # Core algorithm source files
 set(SOURCES
+    src/Graph.cpp
+    src/Dijkstra.cpp
+    src/DistanceMatrix.cpp
+    src/NearestNeighbor.cpp
+    src/TwoOpt.cpp
+    src/RouteUtils.cpp
     src/Optimizer.cpp
 )
 

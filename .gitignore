@@ -22,6 +22,7 @@ CMakeFiles/
 cmake_install.cmake
 Makefile
 compile_commands.json
+.cache/
 
 # Environment variables & logs
 .env
