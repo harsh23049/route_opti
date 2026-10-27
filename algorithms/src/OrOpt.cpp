@@ -15,8 +15,8 @@ int OrOpt::improve(std::vector<int>& tour, const DistanceMatrix& matrix, int max
     int moves = 0;
     bool improved = true;
 
-    // ponytail: first-improvement with a rescan after each move (indices shift on relocation).
-    // O(N^2) per move is fine for delivery-sized tours; use neighbor lists if N grows to thousands.
+    // First-improvement with a rescan after each move (indices shift on relocation).
+    // O(N^2) per move is fine for delivery-sized tours; neighbor lists would help for thousands of stops.
     while (improved && moves < maxMoves) {
         improved = false;
 
